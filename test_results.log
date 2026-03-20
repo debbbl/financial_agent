@@ -1,0 +1,77 @@
+============================= test session starts =============================
+platform win32 -- Python 3.13.5, pytest-8.2.0, pluggy-1.6.0 -- c:\Users\ProUser\Downloads\financial_agent\venv\Scripts\python.exe
+cachedir: .pytest_cache
+rootdir: C:\Users\ProUser\Downloads\financial_agent
+plugins: anyio-4.12.1, asyncio-0.23.7
+asyncio: mode=Mode.STRICT
+collecting ... collected 49 items
+
+tests/test_financial_agent.py::TestComputeSentiment::test_all_bullish PASSED [  2%]
+tests/test_financial_agent.py::TestComputeSentiment::test_all_bearish PASSED [  4%]
+tests/test_financial_agent.py::TestComputeSentiment::test_empty_returns_zero PASSED [  6%]
+tests/test_financial_agent.py::TestComputeSentiment::test_high_impact_weighted_more PASSED [  8%]
+tests/test_financial_agent.py::TestComputeSentiment::test_score_bounded PASSED [ 10%]
+tests/test_financial_agent.py::TestFilterNews::test_filter_by_category PASSED [ 12%]
+tests/test_financial_agent.py::TestFilterNews::test_filter_by_sentiment PASSED [ 14%]
+tests/test_financial_agent.py::TestFilterNews::test_filter_combined PASSED [ 16%]
+tests/test_financial_agent.py::TestFilterNews::test_no_filter_returns_all PASSED [ 18%]
+tests/test_financial_agent.py::TestFilterNews::test_empty_category_list_returns_nothing FAILED [ 20%]
+tests/test_financial_agent.py::TestFilterNews::test_unknown_category_returns_nothing PASSED [ 22%]
+tests/test_financial_agent.py::TestGetRangeNews::test_within_range FAILED [ 24%]
+tests/test_financial_agent.py::TestGetRangeNews::test_boundary_inclusive PASSED [ 26%]
+tests/test_financial_agent.py::TestGetRangeNews::test_no_news_in_range PASSED [ 28%]
+tests/test_financial_agent.py::TestGetRangeNews::test_full_range_returns_all PASSED [ 30%]
+tests/test_financial_agent.py::TestClassifyCategory::test_earnings_category PASSED [ 32%]
+tests/test_financial_agent.py::TestClassifyCategory::test_product_category PASSED [ 34%]
+tests/test_financial_agent.py::TestClassifyCategory::test_policy_category PASSED [ 36%]
+tests/test_financial_agent.py::TestClassifyCategory::test_default_to_market PASSED [ 38%]
+tests/test_financial_agent.py::TestScoreSentiment::test_bullish_text PASSED [ 40%]
+tests/test_financial_agent.py::TestScoreSentiment::test_bearish_text PASSED [ 42%]
+tests/test_financial_agent.py::TestScoreSentiment::test_neutral_text PASSED [ 44%]
+tests/test_financial_agent.py::TestExecuteToolAnalyzeRange::test_returns_valid_json PASSED [ 46%]
+tests/test_financial_agent.py::TestExecuteToolAnalyzeRange::test_empty_date_range PASSED [ 48%]
+tests/test_financial_agent.py::TestExecuteToolAnalyzeRange::test_price_change_is_correct PASSED [ 51%]
+tests/test_financial_agent.py::TestExecuteToolForecast::test_probabilities_sum_to_100 PASSED [ 53%]
+tests/test_financial_agent.py::TestExecuteToolForecast::test_probabilities_in_valid_range PASSED [ 55%]
+tests/test_financial_agent.py::TestExecuteToolForecast::test_verdict_matches_probability PASSED [ 57%]
+tests/test_financial_agent.py::TestExecuteToolSimilarPeriods::test_returns_results PASSED [ 59%]
+tests/test_financial_agent.py::TestExecuteToolCategorySummary::test_earnings_summary PASSED [ 61%]
+tests/test_financial_agent.py::TestExecuteToolCategorySummary::test_missing_category PASSED [ 63%]
+tests/test_financial_agent.py::TestFinancialAgentIntegration::test_agent_responds_without_tool FAILED [ 65%]
+tests/test_financial_agent.py::TestFinancialAgentIntegration::test_agent_executes_tool_then_responds FAILED [ 67%]
+tests/test_financial_agent.py::TestFinancialAgentIntegration::test_conversation_history_grows FAILED [ 69%]
+tests/test_financial_agent.py::TestFinancialAgentIntegration::test_reset_clears_history FAILED [ 71%]
+tests/test_financial_agent.py::TestFinancialAgentIntegration::test_no_stock_data_returns_message FAILED [ 73%]
+tests/test_financial_agent.py::TestEdgeCases::test_single_day_price_data PASSED [ 75%]
+tests/test_financial_agent.py::TestEdgeCases::test_news_with_extreme_scores PASSED [ 77%]
+tests/test_financial_agent.py::TestEdgeCases::test_filter_returns_empty_list_not_none PASSED [ 79%]
+tests/test_financial_agent.py::TestEdgeCases::test_classify_category_for_unknown_text PASSED [ 81%]
+tests/test_financial_agent.py::TestEdgeCases::test_tool_unknown_name_returns_error PASSED [ 83%]
+tests/test_financial_agent.py::TestQualityAssurance::test_news_events_have_valid_sentiment_values PASSED [ 85%]
+tests/test_financial_agent.py::TestQualityAssurance::test_news_events_have_valid_categories PASSED [ 87%]
+tests/test_financial_agent.py::TestQualityAssurance::test_news_dates_are_valid_format PASSED [ 89%]
+tests/test_financial_agent.py::TestQualityAssurance::test_sentiment_scores_within_bounds PASSED [ 91%]
+tests/test_financial_agent.py::TestQualityAssurance::test_sentiment_score_sign_matches_sentiment_label PASSED [ 93%]
+tests/test_financial_agent.py::TestQualityAssurance::test_stock_data_current_price_positive PASSED [ 95%]
+tests/test_financial_agent.py::TestQualityAssurance::test_agent_system_prompt_not_empty FAILED [ 97%]
+tests/test_financial_agent.py::TestQualityAssurance::test_tools_schema_has_required_fields PASSED [100%]
+
+================================== FAILURES ===================================
+C:\Users\ProUser\Downloads\financial_agent\tests\test_financial_agent.py:128: AssertionError: assert 6 == 0
+C:\Users\ProUser\Downloads\financial_agent\tests\test_financial_agent.py:139: AssertionError: assert 3 == 2
+c:\Users\ProUser\Downloads\financial_agent\venv\Lib\site-packages\groq\_base_client.py:722: TypeError: Client.__init__() got an unexpected keyword argument 'proxies'
+c:\Users\ProUser\Downloads\financial_agent\venv\Lib\site-packages\groq\_base_client.py:722: TypeError: Client.__init__() got an unexpected keyword argument 'proxies'
+c:\Users\ProUser\Downloads\financial_agent\venv\Lib\site-packages\groq\_base_client.py:722: TypeError: Client.__init__() got an unexpected keyword argument 'proxies'
+c:\Users\ProUser\Downloads\financial_agent\venv\Lib\site-packages\groq\_base_client.py:722: TypeError: Client.__init__() got an unexpected keyword argument 'proxies'
+c:\Users\ProUser\Downloads\financial_agent\venv\Lib\site-packages\groq\_base_client.py:722: TypeError: Client.__init__() got an unexpected keyword argument 'proxies'
+c:\Users\ProUser\Downloads\financial_agent\venv\Lib\site-packages\groq\_base_client.py:722: TypeError: Client.__init__() got an unexpected keyword argument 'proxies'
+=========================== short test summary info ===========================
+FAILED tests/test_financial_agent.py::TestFilterNews::test_empty_category_list_returns_nothing
+FAILED tests/test_financial_agent.py::TestGetRangeNews::test_within_range - A...
+FAILED tests/test_financial_agent.py::TestFinancialAgentIntegration::test_agent_responds_without_tool
+FAILED tests/test_financial_agent.py::TestFinancialAgentIntegration::test_agent_executes_tool_then_responds
+FAILED tests/test_financial_agent.py::TestFinancialAgentIntegration::test_conversation_history_grows
+FAILED tests/test_financial_agent.py::TestFinancialAgentIntegration::test_reset_clears_history
+FAILED tests/test_financial_agent.py::TestFinancialAgentIntegration::test_no_stock_data_returns_message
+FAILED tests/test_financial_agent.py::TestQualityAssurance::test_agent_system_prompt_not_empty
+======================== 8 failed, 41 passed in 2.09s =========================
