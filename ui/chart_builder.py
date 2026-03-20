@@ -199,6 +199,7 @@ def build_candlestick_chart(
         dragmode="select",   # enables box-drag selection
         selectdirection="h", # horizontal only — date range selection
         hovermode="closest",
+        clickmode="event+select",
     )
 
     return fig

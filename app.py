@@ -323,8 +323,9 @@ with tab1:
 
         # Handle drag box selection → populate date range
         if chart_event and hasattr(chart_event, "selection") and chart_event.selection:
-            # Plotly box-select stores range in event.selection.box
-            box = getattr(chart_event.selection, "box", None)
+            sel = chart_event.selection
+            # Plotly event.selection is typically a dict in Streamlit
+            box = sel.get("box", []) if isinstance(sel, dict) else getattr(sel, "box", [])
             if box and len(box) > 0:
                 x_range = box[0].get("x", [])
                 if len(x_range) == 2:
@@ -336,7 +337,7 @@ with tab1:
                     st.session_state.range_end_val   = end_str
 
             # Handle single dot click → news details panel
-            points = getattr(chart_event.selection, "points", [])
+            points = sel.get("points", []) if isinstance(sel, dict) else getattr(sel, "points", [])
             if points and len(points) > 0:
                 clicked_x = str(points[0].get("x", ""))[:10]
                 if clicked_x:
