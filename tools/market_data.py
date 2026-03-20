@@ -193,7 +193,7 @@ def fetch_from_newsapi(ticker: str, company_name: str, days: int = 30) -> list:
     if not NEWSAPI_API_KEY: return []
     try:
         from_date = (datetime.now() - timedelta(days=min(days,29))).strftime("%Y-%m-%d")
-        params = {"q":f'"{ticker}" OR "{company_name}" stock',"from":from_date,
+        params = {"q":f'"{ticker}" stock price OR "{company_name}" earnings OR "{company_name}" investor',"from":from_date,
                   "sortBy":"publishedAt","language":"en","pageSize":100,"apiKey":NEWSAPI_API_KEY,
                   "sources":"bloomberg,reuters,the-wall-street-journal,cnbc,business-insider,fortune,forbes"}
         resp = requests.get("https://newsapi.org/v2/everything", params=params, timeout=10)
@@ -204,11 +204,18 @@ def fetch_from_newsapi(ticker: str, company_name: str, days: int = 30) -> list:
         data = resp.json()
         if data.get("status") != "ok": return []
         results = []
+        required_words = {ticker.lower(), company_name.lower(), "stock", "shares", "earnings", "revenue", "market", "investor", "trading", "nyse", "nasdaq"}
+        
         for a in data.get("articles",[]):
             try: date_str = datetime.strptime(a.get("publishedAt","")[:10],"%Y-%m-%d").strftime("%Y-%m-%d")
             except: continue
             title = a.get("title") or ""
             if len(title) < 10 or "[Removed]" in title: continue
+            
+            title_lower = title.lower()
+            if not any(w in title_lower for w in required_words):
+                continue
+                
             results.append({"date":date_str,"title":title,
                 "source":a.get("source",{}).get("name","NewsAPI"),
                 "summary":a.get("description",""),"url":a.get("url","")})
@@ -292,9 +299,12 @@ def fetch_news_all_sources(ticker: str, start_date: str, end_date: str, days: in
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
-def fetch_stock_data(ticker: str, period: str = "3mo") -> StockData:
+def fetch_stock_data(ticker: str, period: str = "3mo", start: str = None, end: str = None) -> StockData:
     stock = yf.Ticker(ticker)
-    hist = stock.history(period=period)
+    if start and end:
+        hist = stock.history(start=start, end=end)
+    else:
+        hist = stock.history(period=period)
     if hist.empty:
         raise ValueError(f"No price data found for ticker '{ticker}'")
 
@@ -327,8 +337,8 @@ def compute_overall_sentiment(news: list) -> float:
 
 def filter_news(news: list, categories: Optional[list] = None, sentiments: Optional[list] = None) -> list:
     result = news
-    if categories: result = [n for n in result if n.category in categories]
-    if sentiments: result = [n for n in result if n.sentiment in sentiments]
+    if categories is not None: result = [n for n in result if n.category in categories]
+    if sentiments is not None: result = [n for n in result if n.sentiment in sentiments]
     return result
 
 

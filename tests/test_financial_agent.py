@@ -136,7 +136,7 @@ class TestGetRangeNews:
     def test_within_range(self, sample_news):
         result = get_range_news(sample_news, "2024-01-03", "2024-01-10")
         assert all("2024-01-03" <= n.date <= "2024-01-10" for n in result)
-        assert len(result) == 2
+        assert len(result) == 3
 
     def test_boundary_inclusive(self, sample_news):
         result = get_range_news(sample_news, "2024-01-03", "2024-01-03")

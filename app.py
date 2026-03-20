@@ -4,11 +4,13 @@ Financial Agent: Event-Driven Stock Analysis with Agentic AI
 
 Run: streamlit run app.py
 """
+# trunk-ignore-all(ruff/E402)
 
 import streamlit as st
 import os
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
+import pandas as pd
 from dotenv import load_dotenv
 
 from tools.market_data import (
@@ -93,6 +95,10 @@ if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "selected_range" not in st.session_state:
     st.session_state.selected_range = None
+if "selected_news_event" not in st.session_state:
+    st.session_state.selected_news_event = None
+if "selected_news_date" not in st.session_state:
+    st.session_state.selected_news_date = None
 
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -114,11 +120,43 @@ with st.sidebar:
     if custom.strip():
         ticker = custom.strip().upper()
 
-    period = st.select_slider(
-        "Data period",
-        options=["1mo", "3mo", "6mo", "1y"],
-        value="3mo",
+    PERIOD_PRESETS = {
+        "1 Week": "5d",
+        "1 Month": "1mo",
+        "3 Months": "3mo",
+        "6 Months": "6mo",
+        "YTD": "ytd",
+        "1 Year": "1y",
+        "2 Years": "2y",
+        "5 Years": "5y",
+        "Custom Range": "custom",
+    }
+    period_label = st.selectbox(
+        "Date range",
+        list(PERIOD_PRESETS.keys()),
+        index=2,
+        help="Choose a preset period or pick a custom date range",
     )
+    period = PERIOD_PRESETS[period_label]
+
+    custom_start = custom_end = None
+    if period == "custom":
+        today = date.today()
+        col_d1, col_d2 = st.columns(2)
+        with col_d1:
+            custom_start = st.date_input(
+                "Start date",
+                value=today - timedelta(days=90),
+                max_value=today,
+                key="sidebar_start",
+            )
+        with col_d2:
+            custom_end = st.date_input(
+                "End date",
+                value=today,
+                max_value=today,
+                key="sidebar_end",
+            )
 
     load_btn = st.button("Load Stock Data", type="primary", use_container_width=True)
 
@@ -143,9 +181,6 @@ with st.sidebar:
         f_bearish = st.checkbox("Bearish", value=True)
 
     st.divider()
-    st.caption("Built for AI Engineer Assessment · Agentic AI System")
-
-    st.divider()
     st.subheader("Session history")
     sessions = get_all_sessions(limit=5)
     for s in sessions:
@@ -165,10 +200,19 @@ with st.sidebar:
 if load_btn:
     if not api_key:
         st.error("Please enter your Groq API key in the sidebar.")
+    elif period == "custom" and custom_start and custom_end and custom_start >= custom_end:
+        st.error("Start date must be before end date.")
     else:
         with st.spinner(f"Fetching {ticker} data..."):
             try:
-                stock_data = fetch_stock_data(ticker, period)
+                if period == "custom" and custom_start and custom_end:
+                    stock_data = fetch_stock_data(
+                        ticker,
+                        start=custom_start.strftime("%Y-%m-%d"),
+                        end=custom_end.strftime("%Y-%m-%d"),
+                    )
+                else:
+                    stock_data = fetch_stock_data(ticker, period=period)
                 agent = FinancialAgent(api_key=api_key, session_id=st.session_state.session_id)
                 agent.set_stock_data(stock_data)
                 st.session_state.stock_data = stock_data
@@ -178,6 +222,8 @@ if load_btn:
                 update_session(st.session_state.session_id, ticker=ticker, period=period)
                 st.session_state.chat_history = []
                 st.session_state.selected_range = None
+                st.session_state.selected_news_event = None
+                st.session_state.selected_news_date = None
                 st.success(f"Loaded {ticker} — {len(stock_data.prices)} trading days, {len(stock_data.news)} news events")
             except Exception as e:
                 st.error(f"Failed to load data: {e}")
@@ -266,56 +312,148 @@ with tab1:
             news=filtered_news,
             ticker=sd.ticker,
             selected_range=st.session_state.selected_range,
+            selected_news_date=st.session_state.selected_news_date,
         )
-        chart_event = st.plotly_chart(fig, use_container_width=True, on_select="rerun", key="main_chart")
+        chart_event = st.plotly_chart(
+            fig,
+            use_container_width=True,
+            on_select="rerun",
+            key="main_chart"
+        )
 
-        # Handle plotly range selection
+        # Handle drag box selection → populate date range
         if chart_event and hasattr(chart_event, "selection") and chart_event.selection:
-            sel = chart_event.selection
-            if hasattr(sel, "box") and sel.box:
-                box = sel.box[0]
-                start = box.get("x")[0][:10] if box.get("x") else None
-                end = box.get("x")[1][:10] if box.get("x") else None
-                if start and end:
-                    st.session_state.selected_range = (start, end)
+            # Plotly box-select stores range in event.selection.box
+            box = getattr(chart_event.selection, "box", None)
+            if box and len(box) > 0:
+                x_range = box[0].get("x", [])
+                if len(x_range) == 2:
+                    start_str = str(x_range[0])[:10]
+                    end_str   = str(x_range[1])[:10]
+                    # Populate session state so date pickers reflect the selection
+                    st.session_state.selected_range  = (start_str, end_str)
+                    st.session_state.range_start_val = start_str
+                    st.session_state.range_end_val   = end_str
+
+            # Handle single dot click → news details panel
+            points = getattr(chart_event.selection, "points", [])
+            if points and len(points) > 0:
+                clicked_x = str(points[0].get("x", ""))[:10]
+                if clicked_x:
+                    st.session_state.selected_news_date = clicked_x
+
+        # News details panel (below chart)
+        details_container = st.container(border=True)
+        with details_container:
+            selected_date = st.session_state.selected_news_date
+            events_on_date = [n for n in filtered_news if n.date == selected_date] if selected_date else []
+            
+            if events_on_date:
+                for idx, ev in enumerate(events_on_date):
+                    if idx > 0:
+                        st.markdown("<hr style='margin: 10px 0;'>", unsafe_allow_html=True)
+                        
+                    cat_style = CAT_BADGE_STYLES.get(ev.category.lower(), "background:#eee;color:#333")
+                    sent_color = "#3B6D11" if ev.sentiment == "bullish" else "#A32D2D" if ev.sentiment == "bearish" else "#5F5E5A"
+                    sent_arrow = "▲" if ev.sentiment == "bullish" else "▼" if ev.sentiment == "bearish" else "●"
+                    
+                    score_str = f"{ev.sentiment_score:+.2f}"
+                    
+                    header_html = f"""
+                    <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom: 8px;">
+                        <div>
+                            <span class="cat-badge" style="{cat_style}">{ev.category.title()}</span>
+                            &nbsp;<span style="color:{sent_color}; font-size:13px; font-weight:600">{sent_arrow} {ev.sentiment.title()} ({score_str})</span>
+                        </div>
+                        <div style="font-size:12px; color:#6c757d; text-align:right;">
+                            {ev.date} · {ev.source}
+                        </div>
+                    </div>
+                    <h4 style="margin: 0 0 8px 0; font-size: 16px;">{ev.title}</h4>
+                    """
+                    st.markdown(header_html, unsafe_allow_html=True)
+                    
+                    if ev.summary:
+                        st.markdown(f"<div style='font-size:14px; color:#495057; margin-bottom:12px;'>{{ev.summary}}</div>", unsafe_allow_html=True)
+                    
+                    if ev.url:
+                        st.markdown(f"<a href='{{ev.url}}' target='_blank' style='font-size:13px; font-weight:500; text-decoration:none;'>🔗 Read full article from {{ev.source}}</a>", unsafe_allow_html=True)
+            else:
+                st.markdown("<div style='text-align:center; color:#6c757d; padding:20px 0;'>Click a dot on the chart to see news details.</div>", unsafe_allow_html=True)
+
+        st.markdown("**News sentiment over time**")
+        fig_sent = build_sentiment_timeline(filtered_news)
+        if fig_sent.data:
+            st.plotly_chart(fig_sent, use_container_width=True, key="sent_chart")
+        else:
+            st.caption("No sentiment data available for the current filters.")
 
         # Range selector controls
         st.markdown("**AI Range Analysis**")
+        
+        # Determine default values — use drag selection if available
+        default_start = pd.to_datetime(
+            st.session_state.get("range_start_val",
+            sd.prices.index[-min(30, len(sd.prices))].strftime("%Y-%m-%d"))
+        ).date()
+
+        default_end = pd.to_datetime(
+            st.session_state.get("range_end_val",
+            sd.prices.index[-1].strftime("%Y-%m-%d"))
+        ).date()
+
         r_col1, r_col2, r_col3 = st.columns([2, 2, 1])
         with r_col1:
             range_start = st.date_input(
                 "From",
-                value=sd.prices.index[-min(30, len(sd.prices))].date(),
+                value=default_start,
                 min_value=sd.prices.index[0].date(),
                 max_value=sd.prices.index[-1].date(),
+                key="date_from"
             )
         with r_col2:
             range_end = st.date_input(
                 "To",
-                value=sd.prices.index[-1].date(),
+                value=default_end,
                 min_value=sd.prices.index[0].date(),
                 max_value=sd.prices.index[-1].date(),
+                key="date_to"
             )
         with r_col3:
             analyze_btn = st.button("Analyze Range ✨", type="primary", use_container_width=True)
 
-        if analyze_btn:
+        # Auto-trigger if range was set by drag (not just default)
+        range_was_dragged = (
+            "range_start_val" in st.session_state and
+            "range_end_val" in st.session_state
+        )
+
+        if analyze_btn or range_was_dragged:
             start_str = range_start.strftime("%Y-%m-%d")
             end_str   = range_end.strftime("%Y-%m-%d")
-            st.session_state.selected_range = (start_str, end_str)
-            range_news = get_range_news(sd.news, start_str, end_str)
 
-            with st.spinner("AI is analyzing this price range..."):
-                question = (
-                    f"Analyze the price movement in {sd.ticker} from {start_str} to {end_str}. "
-                    f"Use your tools to examine the price action and explain what news events "
-                    f"drove the movement. Be specific and educational."
-                )
-                answer = st.session_state.agent.chat(question)
-                st.session_state.chat_history.append(("Range Analysis", answer))
+            if start_str >= end_str:
+                st.warning("Start date must be before end date.")
+            else:
+                # Clear the drag flag so it doesn't re-trigger on next rerun
+                st.session_state.pop("range_start_val", None)
+                st.session_state.pop("range_end_val",   None)
 
-            st.markdown("#### AI Range Explanation")
-            st.info(answer)
+                st.session_state.selected_range = (start_str, end_str)
+                range_news = get_range_news(sd.news, start_str, end_str)
+
+                with st.spinner("AI is analyzing this price range..."):
+                    question = (
+                        f"Analyze the price movement in {sd.ticker} from "
+                        f"{start_str} to {end_str}. Use your tools to examine "
+                        f"the price action and explain what news events drove "
+                        f"the movement. Be specific and educational for a beginner investor."
+                    )
+                    answer = st.session_state.agent.chat(question)
+                    st.session_state.chat_history.append(("Range Analysis", answer))
+
+                st.markdown("#### AI Range Explanation")
+                st.info(answer)
 
         # Sentiment timeline
         st.markdown("**News Sentiment Over Time**")
