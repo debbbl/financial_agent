@@ -9,6 +9,7 @@ Run: streamlit run app.py
 import streamlit as st
 import os
 import json
+import textwrap
 from datetime import datetime, timedelta, date
 import pandas as pd
 from dotenv import load_dotenv
@@ -295,6 +296,7 @@ with m4:
     </div>""", unsafe_allow_html=True)
 
 
+
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 tab1, tab2, tab3 = st.tabs(["📊 Chart & Analysis", "🤖 AI Chat", "📰 News Feed"])
 
@@ -321,68 +323,78 @@ with tab1:
             key="main_chart"
         )
 
-        # Handle drag box selection → populate date range
-        if chart_event and hasattr(chart_event, "selection") and chart_event.selection:
-            sel = chart_event.selection
-            # Plotly event.selection is typically a dict in Streamlit
-            box = sel.get("box", []) if isinstance(sel, dict) else getattr(sel, "box", [])
+        # Handle Plotly selection/click events
+        if chart_event and isinstance(chart_event, dict) and "selection" in chart_event:
+            sel = chart_event["selection"]
+            points = sel.get("points", [])
+            box = sel.get("box", [])
+
+            # A: Drag selection (box)
             if box and len(box) > 0:
                 x_range = box[0].get("x", [])
                 if len(x_range) == 2:
                     start_str = str(x_range[0])[:10]
                     end_str   = str(x_range[1])[:10]
-                    # Populate session state so date pickers reflect the selection
                     st.session_state.selected_range  = (start_str, end_str)
                     st.session_state.range_start_val = start_str
                     st.session_state.range_end_val   = end_str
-
-            # Handle single dot click → news details panel
-            points = sel.get("points", []) if isinstance(sel, dict) else getattr(sel, "points", [])
-            if points and len(points) > 0:
-                custom_data = points[0].get("customdata", [])
-                if isinstance(custom_data, list) and len(custom_data) > 4:
-                    st.session_state.selected_news_date = str(custom_data[4])
+            
+            # B: Single point click (points)
+            elif points and len(points) > 0:
+                pt = points[0]
+                # Try to get date from customdata (index 4 for dots)
+                cd = pt.get("customdata")
+                if isinstance(cd, list) and len(cd) > 4:
+                    st.session_state.selected_news_date = str(cd[4])[:10]
                 else:
-                    clicked_x = str(points[0].get("x", ""))[:10]
+                    # Fallback: get date from x coordinate
+                    clicked_x = pt.get("x")
                     if clicked_x:
-                        st.session_state.selected_news_date = clicked_x
-            elif not st.session_state.get("selected_range"):
-                # Empty click with no drag active → clear dot selection
+                        st.session_state.selected_news_date = str(clicked_x)[:10]
+                
+                # Clear range if a single point is clicked
+                st.session_state.pop("selected_range", None)
+            
+            # C: Empty selection (click background)
+            else:
                 st.session_state.pop("selected_news_date", None)
+                st.session_state.pop("selected_range", None)
 
-        def render_news_card(ev):
+
+        def render_news_card_html(ev):
             cat_style = CAT_BADGE_STYLES.get(ev.category.lower(), "background:#eee;color:#333")
             sent_color = "#3B6D11" if ev.sentiment == "bullish" else "#A32D2D" if ev.sentiment == "bearish" else "#5F5E5A"
             sent_arrow = "▲" if ev.sentiment == "bullish" else "▼" if ev.sentiment == "bearish" else "●"
-            
             score_str = f"{ev.sentiment_score:+.2f}"
             
-            header_html = f"""
-            <div style="display:flex; flex-wrap:wrap; justify-content:space-between; align-items:flex-start; margin-bottom: 8px; gap:8px;">
-                <div>
-                    <span class="cat-badge" style="{cat_style}">{ev.category.title()}</span>
-                    &nbsp;<span style="color:{sent_color}; font-size:13px; font-weight:600">{sent_arrow} {ev.sentiment.title()} ({score_str})</span>
+            summary_html = f"<div style='font-size:14px; color:#495057; margin-bottom:12px;'>{ev.summary}</div>" if ev.summary else ""
+            link_html = f"<a href='{ev.url}' target='_blank' style='font-size:13px; font-weight:500; text-decoration:none;'>🔗 Read full article from {ev.source}</a>" if ev.url else ""
+            
+            return textwrap.dedent(f"""
+                <div style="margin-bottom: 16px;">
+                    <div style="display:flex; flex-wrap:wrap; justify-content:space-between; align-items:flex-start; margin-bottom: 8px; gap:8px;">
+                        <div>
+                            <span class="cat-badge" style="{cat_style}">{ev.category.title()}</span>
+                            &nbsp;<span style="color:{sent_color}; font-size:13px; font-weight:600">{sent_arrow} {ev.sentiment.title()} ({score_str})</span>
+                        </div>
+                        <div style="font-size:12px; color:#6c757d; text-align:right;">
+                            {ev.date} · {ev.source}
+                        </div>
+                    </div>
+                    <h4 style="margin: 0 0 8px 0; font-size: 16px;">{ev.title}</h4>
+                    {summary_html}
+                    {link_html}
+                    <hr style='margin: 10px 0; border:0; border-top:0.5px solid rgba(0,0,0,0.1);'>
                 </div>
-                <div style="font-size:12px; color:#6c757d; text-align:right;">
-                    {ev.date} · {ev.source}
-                </div>
-            </div>
-            <h4 style="margin: 0 0 8px 0; font-size: 16px;">{ev.title}</h4>
-            """
-            st.markdown(header_html, unsafe_allow_html=True)
-            
-            if ev.summary:
-                st.markdown(f"<div style='font-size:14px; color:#495057; margin-bottom:12px;'>{ev.summary}</div>", unsafe_allow_html=True)
-            
-            if ev.url:
-                st.markdown(f"<a href='{ev.url}' target='_blank' style='font-size:13px; font-weight:500; text-decoration:none;'>🔗 Read full article from {ev.source}</a>", unsafe_allow_html=True)
-            
-            st.markdown("<hr style='margin: 10px 0;'>", unsafe_allow_html=True)
+            """).strip()
 
         # Range selector controls
         st.markdown("**AI Range Analysis**")
         
         # Determine default values — use drag selection if available
+        min_date = sd.prices.index[0].date()
+        max_date = sd.prices.index[-1].date()
+
         default_start = pd.to_datetime(
             st.session_state.get("range_start_val",
             sd.prices.index[-min(30, len(sd.prices))].strftime("%Y-%m-%d"))
@@ -393,21 +405,25 @@ with tab1:
             sd.prices.index[-1].strftime("%Y-%m-%d"))
         ).date()
 
+        # Clip to allowed range to prevent StreamlitAPIException
+        default_start = max(min_date, min(max_date, default_start))
+        default_end = max(min_date, min(max_date, default_end))
+
         r_col1, r_col2, r_col3 = st.columns([2, 2, 1])
         with r_col1:
             range_start = st.date_input(
                 "From",
                 value=default_start,
-                min_value=sd.prices.index[0].date(),
-                max_value=sd.prices.index[-1].date(),
+                min_value=min_date,
+                max_value=max_date,
                 key="date_from"
             )
         with r_col2:
             range_end = st.date_input(
                 "To",
                 value=default_end,
-                min_value=sd.prices.index[0].date(),
-                max_value=sd.prices.index[-1].date(),
+                min_value=min_date,
+                max_value=max_date,
                 key="date_to"
             )
         with r_col3:
@@ -441,23 +457,25 @@ with tab1:
                     news_by_date[event.date].append(event)
 
                 filtered_range_news = []
-                for date in sorted(news_by_date.keys(), reverse=True):
+                for date in sorted(news_by_date.keys()):
                     day_news = news_by_date[date]
                     top3 = sorted(day_news, key=lambda n: abs(n.sentiment_score), reverse=True)[:3]
                     filtered_range_news.extend(top3)
                 
                 if filtered_range_news:
                     st.markdown(f"**Top news in selected range** · {len(filtered_range_news)} of {len(range_news)} shown")
-
+                    
+                    news_html_list = [render_news_card_html(ev) for ev in filtered_range_news]
+                    full_news_html = "".join(news_html_list)
+                    
                     st.markdown(
-                        '<div style="max-height:280px; overflow-y:auto; '
-                        'border:0.5px solid rgba(0,0,0,0.1); '
-                        'border-radius:8px; padding:8px 12px;">',
+                        f'<div style="max-height:280px; overflow-y:auto; '
+                        f'border:0.1px solid rgba(0,0,0,0.1); '
+                        f'border-radius:8px; padding:12px 16px; background:#ffffff;">'
+                        f'{full_news_html}'
+                        f'</div>',
                         unsafe_allow_html=True
                     )
-                    for event in filtered_range_news:
-                        render_news_card(event)
-                    st.markdown('</div>', unsafe_allow_html=True)
                 
                 # Render AI analysis
                 if analyze_btn or range_was_dragged:
@@ -489,17 +507,22 @@ with tab1:
                 dot_news = [n for n in filtered_news if n.date == clicked_date]
                 if dot_news:
                     st.markdown(f"**News on {clicked_date}**")
+                    
+                    news_html_list = [render_news_card_html(ev) for ev in dot_news]
+                    full_news_html = "".join(news_html_list)
+                    
+                    # Wrap in scroll container if more than 3 items
                     if len(dot_news) > 3:
                         st.markdown(
-                            '<div style="max-height:320px; overflow-y:auto; '
-                            'border:0.5px solid var(--color-border-tertiary); '
-                            'border-radius:8px; padding:8px;">',
+                            f'<div style="max-height:320px; overflow-y:auto; '
+                            f'border:0.1px solid rgba(0,0,0,0.1); '
+                            f'border-radius:8px; padding:12px 16px; background:#ffffff;">'
+                            f'{full_news_html}'
+                            f'</div>',
                             unsafe_allow_html=True
                         )
-                    for event in dot_news:
-                        render_news_card(event)
-                    if len(dot_news) > 3:
-                        st.markdown('</div>', unsafe_allow_html=True)
+                    else:
+                        st.markdown(full_news_html, unsafe_allow_html=True)
                 else:
                     st.caption("No news events found for that date.")
 
@@ -618,33 +641,146 @@ with tab2:
 # TAB 3 — News Feed
 # ══════════════════════════════════════════════════════════════════════════════
 with tab3:
-    st.markdown(f"### {sd.ticker} News Feed")
+    col_t1, col_t2 = st.columns([3, 1])
+    with col_t1:
+        st.markdown(f"### {sd.ticker} News Feed")
+    with col_t2:
+        if st.button("🔄 Reset All Filters", use_container_width=True):
+            st.session_state.pop("nf_start", None)
+            st.session_state.pop("nf_end", None)
+            st.session_state.pop("nf_selected_cats", None)
+            st.session_state.pop("nf_selected_sents", None)
+            st.session_state.pop("nf_selected_impacts", None)
+            st.session_state.pop("nf_high_toggle", None)
+            st.session_state.pop("search_query", None)
+            st.rerun()
 
-    # Filters row
-    nf_col1, nf_col2, nf_col3, nf_col4 = st.columns(4)
+    # 1. Keyword search (optional typing)
+    initial_search = st.session_state.get("search_query", "")
+    search_query = st.text_input("🔍 Search news titles or summaries", value=initial_search, placeholder="e.g. iPhone, earnings, chips...", key="search_input")
+    st.session_state.search_query = search_query
+
+    # 2. Filters row
+    nf_col1, nf_col2, nf_col3, nf_col4 = st.columns([1.5, 1, 1, 1])
     
+    min_date = sd.prices.index[0].date()
+    max_date = sd.prices.index[-1].date()
+
     with nf_col1:
-        default_start = pd.to_datetime(sd.prices.index[-min(30, len(sd.prices))].strftime("%Y-%m-%d")).date()
-        default_end = pd.to_datetime(sd.prices.index[-1].strftime("%Y-%m-%d")).date()
-        nf_start = st.date_input("Start Date", value=default_start, key="nf_start")
-        nf_end = st.date_input("End Date", value=default_end, key="nf_end")
+        st.markdown("**Time Period**")
+        # Quick range buttons
+        p_col1, p_col2, p_col3 = st.columns(3)
+        with p_col1:
+            if st.button("1W", use_container_width=True, key="btn_1w"):
+                st.session_state.nf_start = max_date - timedelta(days=7)
+                st.session_state.nf_end = max_date
+            if st.button("3M", use_container_width=True, key="btn_3m"):
+                st.session_state.nf_start = max_date - timedelta(days=90)
+                st.session_state.nf_end = max_date
+        with p_col2:
+            if st.button("1M", use_container_width=True, key="btn_1m"):
+                st.session_state.nf_start = max_date - timedelta(days=30)
+                st.session_state.nf_end = max_date
+            if st.button("6M", use_container_width=True, key="btn_6m"):
+                st.session_state.nf_start = max_date - timedelta(days=180)
+                st.session_state.nf_end = max_date
+        with p_col3:
+            if st.button("YTD", use_container_width=True, key="btn_ytd"):
+                st.session_state.nf_start = date(max_date.year, 1, 1)
+                st.session_state.nf_end = max_date
+            if st.button("MAX", use_container_width=True, key="btn_max"):
+                st.session_state.nf_start = min_date
+                st.session_state.nf_end = max_date
+
+        # Actual date inputs (auto-updated by buttons)
+        def_start = st.session_state.get("nf_start", max_date - timedelta(days=30))
+        def_end = st.session_state.get("nf_end", max_date)
+        
+        # Ensure values stay in bounds
+        def_start = max(min_date, min(max_date, def_start))
+        def_end = max(min_date, min(max_date, def_end))
+
+        nf_start = st.date_input("From", value=def_start, min_value=min_date, max_value=max_date, key="nf_start_input")
+        nf_end = st.date_input("To", value=def_end, min_value=min_date, max_value=max_date, key="nf_end_input")
         
     with nf_col2:
-        all_cats = list(set(n.category for n in sd.news))
-        nf_cats = st.multiselect("Category", all_cats, default=all_cats, key="nf_cat")
+        st.markdown("**Categories**")
+        all_cats = sorted(list(set(n.category for n in sd.news)))
+        
+        # Initialize selected cats in session state if not present
+        if "nf_selected_cats" not in st.session_state:
+            st.session_state.nf_selected_cats = all_cats.copy()
+
+        c_btn1, c_btn2 = st.columns(2)
+        if c_btn1.button("Select All", key="nf_cat_all", use_container_width=True):
+            st.session_state.nf_selected_cats = all_cats.copy()
+            st.rerun()
+        if c_btn2.button("Clear All", key="nf_cat_none", use_container_width=True):
+            st.session_state.nf_selected_cats = []
+            st.rerun()
+
+        # Render checkboxes in a scrollable-ish or compact container
+        nf_cats = []
+        for cat in all_cats:
+            is_checked = cat in st.session_state.nf_selected_cats
+            if st.checkbox(cat.title(), value=is_checked, key=f"nf_cat_cb_{cat}"):
+                nf_cats.append(cat)
+                if cat not in st.session_state.nf_selected_cats:
+                    st.session_state.nf_selected_cats.append(cat)
+            else:
+                if cat in st.session_state.nf_selected_cats:
+                    st.session_state.nf_selected_cats.remove(cat)
         
     with nf_col3:
-        all_impacts = ["High", "Medium", "Low"]
-        nf_impacts = st.multiselect("Impact", all_impacts, default=all_impacts, key="nf_impact")
-        
-    with nf_col4:
-        sort_order = st.selectbox("Sort by", ["Latest Date", "Highest Impact", "Highest Sentiment"], key="nf_sort")
+        st.markdown("**Sentiment**")
+        all_sents = ["Bullish", "Bearish", "Neutral"]
+        if "nf_selected_sents" not in st.session_state:
+            st.session_state.nf_selected_sents = all_sents.copy()
+            
+        nf_sents = []
+        for sent in all_sents:
+            if st.checkbox(sent, value=(sent in st.session_state.nf_selected_sents), key=f"nf_sent_cb_{sent}"):
+                nf_sents.append(sent)
+                if sent not in st.session_state.nf_selected_sents:
+                    st.session_state.nf_selected_sents.append(sent)
+            else:
+                if sent in st.session_state.nf_selected_sents:
+                    st.session_state.nf_selected_sents.remove(sent)
 
-    # Apply filters
+        st.markdown("**Impact Level**")
+        nf_high_only = st.toggle("Only High Impact", value=st.session_state.get("nf_high_toggle", False), key="nf_high_toggle")
+        
+        if not nf_high_only:
+            all_impacts = ["High", "Medium", "Low"]
+            if "nf_selected_impacts" not in st.session_state:
+                st.session_state.nf_selected_impacts = all_impacts.copy()
+            
+            nf_impacts = []
+            for imp in all_impacts:
+                if st.checkbox(imp, value=(imp in st.session_state.nf_selected_impacts), key=f"nf_imp_cb_{imp}"):
+                    nf_impacts.append(imp)
+                    if imp not in st.session_state.nf_selected_impacts:
+                        st.session_state.nf_selected_impacts.append(imp)
+                else:
+                    if imp in st.session_state.nf_selected_impacts:
+                        st.session_state.nf_selected_impacts.remove(imp)
+        else:
+            nf_impacts = ["High"]
+
+    with nf_col4:
+        st.markdown("**Sort Order**")
+        sort_order = st.selectbox("Order results by", ["Latest Date", "Highest Impact", "Highest Sentiment"], key="nf_sort_sb", label_visibility="collapsed")
+
+    # Apply all filters
     st_date_str = nf_start.strftime("%Y-%m-%d")
     ed_date_str = nf_end.strftime("%Y-%m-%d")
     
     feed_news = [n for n in sd.news if st_date_str <= n.date <= ed_date_str]
+    
+    if search_query.strip():
+        q = search_query.lower().strip()
+        feed_news = [n for n in feed_news if q in n.title.lower() or q in (n.summary or "").lower()]
+
     if nf_cats:
         feed_news = [n for n in feed_news if n.category in nf_cats]
     else:
@@ -652,6 +788,11 @@ with tab3:
         
     if nf_impacts:
         feed_news = [n for n in feed_news if n.impact.title() in nf_impacts]
+    else:
+        feed_news = []
+        
+    if nf_sents:
+        feed_news = [n for n in feed_news if n.sentiment.title() in nf_sents]
     else:
         feed_news = []
         
@@ -672,19 +813,19 @@ with tab3:
         sent_arrow = "▲" if event.sentiment == "bullish" else "▼" if event.sentiment == "bearish" else "●"
 
         with st.container():
-            st.markdown(f"""
-            <div class="news-card">
-                <div style="display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; margin-bottom:4px; gap:8px;">
-                    <div>
-                        <span class="cat-badge" style="{style}">{event.category.title()}</span>
-                        &nbsp;<span style="color:{sent_color};font-size:13px;font-weight:600">{sent_arrow} {event.sentiment.title()} ({event.sentiment_score:+.2f})</span>
+            st.markdown(textwrap.dedent(f"""
+                <div class="news-card">
+                    <div style="display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; margin-bottom:4px; gap:8px;">
+                        <div>
+                            <span class="cat-badge" style="{style}">{event.category.title()}</span>
+                            &nbsp;<span style="color:{sent_color};font-size:13px;font-weight:600">{sent_arrow} {event.sentiment.title()} ({event.sentiment_score:+.2f})</span>
+                        </div>
+                        <span style="font-size:12px;color:#6c757d">{event.date} · {event.source}</span>
                     </div>
-                    <span style="font-size:12px;color:#6c757d">{event.date} · {event.source}</span>
+                    <div style="font-size:14px;color:#212529;font-weight:500">{event.title}</div>
+                    <div style="font-size:12px;color:#6c757d;margin-top:2px">Impact: {event.impact.title()}</div>
                 </div>
-                <div style="font-size:14px;color:#212529;font-weight:500">{event.title}</div>
-                <div style="font-size:12px;color:#6c757d;margin-top:2px">Impact: {event.impact.title()}</div>
-            </div>
-            """, unsafe_allow_html=True)
+            """), unsafe_allow_html=True)
 
             # Quick AI analysis button per news item
             if st.button(f"AI: explain this event's market impact", key=f"news_{idx}_{event.date}_{event.category}"):
