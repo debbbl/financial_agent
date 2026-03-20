@@ -339,55 +339,45 @@ with tab1:
             # Handle single dot click → news details panel
             points = sel.get("points", []) if isinstance(sel, dict) else getattr(sel, "points", [])
             if points and len(points) > 0:
-                clicked_x = str(points[0].get("x", ""))[:10]
-                if clicked_x:
-                    st.session_state.selected_news_date = clicked_x
+                custom_data = points[0].get("customdata", [])
+                if isinstance(custom_data, list) and len(custom_data) > 4:
+                    st.session_state.selected_news_date = str(custom_data[4])
+                else:
+                    clicked_x = str(points[0].get("x", ""))[:10]
+                    if clicked_x:
+                        st.session_state.selected_news_date = clicked_x
+            elif not st.session_state.get("selected_range"):
+                # Empty click with no drag active → clear dot selection
+                st.session_state.pop("selected_news_date", None)
 
-        # News details panel (below chart)
-        details_container = st.container(border=True)
-        with details_container:
-            selected_date = st.session_state.selected_news_date
-            events_on_date = [n for n in filtered_news if n.date == selected_date] if selected_date else []
+        def render_news_card(ev):
+            cat_style = CAT_BADGE_STYLES.get(ev.category.lower(), "background:#eee;color:#333")
+            sent_color = "#3B6D11" if ev.sentiment == "bullish" else "#A32D2D" if ev.sentiment == "bearish" else "#5F5E5A"
+            sent_arrow = "▲" if ev.sentiment == "bullish" else "▼" if ev.sentiment == "bearish" else "●"
             
-            if events_on_date:
-                for idx, ev in enumerate(events_on_date):
-                    if idx > 0:
-                        st.markdown("<hr style='margin: 10px 0;'>", unsafe_allow_html=True)
-                        
-                    cat_style = CAT_BADGE_STYLES.get(ev.category.lower(), "background:#eee;color:#333")
-                    sent_color = "#3B6D11" if ev.sentiment == "bullish" else "#A32D2D" if ev.sentiment == "bearish" else "#5F5E5A"
-                    sent_arrow = "▲" if ev.sentiment == "bullish" else "▼" if ev.sentiment == "bearish" else "●"
-                    
-                    score_str = f"{ev.sentiment_score:+.2f}"
-                    
-                    header_html = f"""
-                    <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom: 8px;">
-                        <div>
-                            <span class="cat-badge" style="{cat_style}">{ev.category.title()}</span>
-                            &nbsp;<span style="color:{sent_color}; font-size:13px; font-weight:600">{sent_arrow} {ev.sentiment.title()} ({score_str})</span>
-                        </div>
-                        <div style="font-size:12px; color:#6c757d; text-align:right;">
-                            {ev.date} · {ev.source}
-                        </div>
-                    </div>
-                    <h4 style="margin: 0 0 8px 0; font-size: 16px;">{ev.title}</h4>
-                    """
-                    st.markdown(header_html, unsafe_allow_html=True)
-                    
-                    if ev.summary:
-                        st.markdown(f"<div style='font-size:14px; color:#495057; margin-bottom:12px;'>{{ev.summary}}</div>", unsafe_allow_html=True)
-                    
-                    if ev.url:
-                        st.markdown(f"<a href='{{ev.url}}' target='_blank' style='font-size:13px; font-weight:500; text-decoration:none;'>🔗 Read full article from {{ev.source}}</a>", unsafe_allow_html=True)
-            else:
-                st.markdown("<div style='text-align:center; color:#6c757d; padding:20px 0;'>Click a dot on the chart to see news details.</div>", unsafe_allow_html=True)
-
-        st.markdown("**News sentiment over time**")
-        fig_sent = build_sentiment_timeline(filtered_news)
-        if fig_sent.data:
-            st.plotly_chart(fig_sent, use_container_width=True, key="sent_chart")
-        else:
-            st.caption("No sentiment data available for the current filters.")
+            score_str = f"{ev.sentiment_score:+.2f}"
+            
+            header_html = f"""
+            <div style="display:flex; flex-wrap:wrap; justify-content:space-between; align-items:flex-start; margin-bottom: 8px; gap:8px;">
+                <div>
+                    <span class="cat-badge" style="{cat_style}">{ev.category.title()}</span>
+                    &nbsp;<span style="color:{sent_color}; font-size:13px; font-weight:600">{sent_arrow} {ev.sentiment.title()} ({score_str})</span>
+                </div>
+                <div style="font-size:12px; color:#6c757d; text-align:right;">
+                    {ev.date} · {ev.source}
+                </div>
+            </div>
+            <h4 style="margin: 0 0 8px 0; font-size: 16px;">{ev.title}</h4>
+            """
+            st.markdown(header_html, unsafe_allow_html=True)
+            
+            if ev.summary:
+                st.markdown(f"<div style='font-size:14px; color:#495057; margin-bottom:12px;'>{ev.summary}</div>", unsafe_allow_html=True)
+            
+            if ev.url:
+                st.markdown(f"<a href='{ev.url}' target='_blank' style='font-size:13px; font-weight:500; text-decoration:none;'>🔗 Read full article from {ev.source}</a>", unsafe_allow_html=True)
+            
+            st.markdown("<hr style='margin: 10px 0;'>", unsafe_allow_html=True)
 
         # Range selector controls
         st.markdown("**AI Range Analysis**")
@@ -429,32 +419,93 @@ with tab1:
             "range_end_val" in st.session_state
         )
 
-        if analyze_btn or range_was_dragged:
-            start_str = range_start.strftime("%Y-%m-%d")
-            end_str   = range_end.strftime("%Y-%m-%d")
+        panel_container = st.container(border=True)
+        with panel_container:
+            # Mode A: drag range selected → show range news + AI analysis
+            if st.session_state.get("selected_range"):
+                
+                if st.button("✕ Clear selection", key="reset_range"):
+                    st.session_state.pop("selected_range", None)
+                    st.session_state.pop("range_start_val", None)
+                    st.session_state.pop("range_end_val", None)
+                    st.session_state.pop("selected_news_date", None)
+                    st.session_state.pop("last_analysis", None)
+                    st.rerun()
 
-            if start_str >= end_str:
-                st.warning("Start date must be before end date.")
-            else:
-                # Clear the drag flag so it doesn't re-trigger on next rerun
-                st.session_state.pop("range_start_val", None)
-                st.session_state.pop("range_end_val",   None)
-
-                st.session_state.selected_range = (start_str, end_str)
+                start_str, end_str = st.session_state.selected_range
                 range_news = get_range_news(sd.news, start_str, end_str)
 
-                with st.spinner("AI is analyzing this price range..."):
-                    question = (
-                        f"Analyze the price movement in {sd.ticker} from "
-                        f"{start_str} to {end_str}. Use your tools to examine "
-                        f"the price action and explain what news events drove "
-                        f"the movement. Be specific and educational for a beginner investor."
-                    )
-                    answer = st.session_state.agent.chat(question)
-                    st.session_state.chat_history.append(("Range Analysis", answer))
+                from collections import defaultdict
+                news_by_date = defaultdict(list)
+                for event in range_news:
+                    news_by_date[event.date].append(event)
 
-                st.markdown("#### AI Range Explanation")
-                st.info(answer)
+                filtered_range_news = []
+                for date in sorted(news_by_date.keys(), reverse=True):
+                    day_news = news_by_date[date]
+                    top3 = sorted(day_news, key=lambda n: abs(n.sentiment_score), reverse=True)[:3]
+                    filtered_range_news.extend(top3)
+                
+                if filtered_range_news:
+                    st.markdown(f"**Top news in selected range** · {len(filtered_range_news)} of {len(range_news)} shown")
+
+                    st.markdown(
+                        '<div style="max-height:280px; overflow-y:auto; '
+                        'border:0.5px solid rgba(0,0,0,0.1); '
+                        'border-radius:8px; padding:8px 12px;">',
+                        unsafe_allow_html=True
+                    )
+                    for event in filtered_range_news:
+                        render_news_card(event)
+                    st.markdown('</div>', unsafe_allow_html=True)
+                
+                # Render AI analysis
+                if analyze_btn or range_was_dragged:
+                    if start_str >= end_str:
+                        st.warning("Start date must be before end date.")
+                    else:
+                        # Clear the drag flag so it doesn't re-trigger on next rerun
+                        st.session_state.pop("range_start_val", None)
+                        st.session_state.pop("range_end_val",   None)
+
+                        with st.spinner("AI is analyzing this price range..."):
+                            question = (
+                                f"Analyze the price movement in {sd.ticker} from "
+                                f"{start_str} to {end_str}. Use your tools to examine "
+                                f"the price action and explain what news events drove "
+                                f"the movement. Be specific and educational for a beginner investor."
+                            )
+                            answer = st.session_state.agent.chat(question)
+                            st.session_state.chat_history.append(("Range Analysis", answer))
+                            st.session_state.last_analysis = answer
+                
+                if st.session_state.get("last_analysis"):
+                    st.markdown("#### AI Range Explanation")
+                    st.info(st.session_state.last_analysis)
+
+            # Mode B: single dot clicked, no drag → show that dot's news only
+            elif st.session_state.get("selected_news_date"):
+                clicked_date = st.session_state.selected_news_date
+                dot_news = [n for n in filtered_news if n.date == clicked_date]
+                if dot_news:
+                    st.markdown(f"**News on {clicked_date}**")
+                    if len(dot_news) > 3:
+                        st.markdown(
+                            '<div style="max-height:320px; overflow-y:auto; '
+                            'border:0.5px solid var(--color-border-tertiary); '
+                            'border-radius:8px; padding:8px;">',
+                            unsafe_allow_html=True
+                        )
+                    for event in dot_news:
+                        render_news_card(event)
+                    if len(dot_news) > 3:
+                        st.markdown('</div>', unsafe_allow_html=True)
+                else:
+                    st.caption("No news events found for that date.")
+
+            # Mode C: nothing selected → show placeholder
+            else:
+                st.caption("Click a dot to see news details · Drag on the chart to select a range for AI analysis")
 
         # Sentiment timeline
         st.markdown("**News Sentiment Over Time**")
@@ -567,19 +618,55 @@ with tab2:
 # TAB 3 — News Feed
 # ══════════════════════════════════════════════════════════════════════════════
 with tab3:
-    st.markdown(f"### {sd.ticker} News Feed — {len(filtered_news)} events")
+    st.markdown(f"### {sd.ticker} News Feed")
 
-    sort_order = st.radio("Sort by", ["Newest first", "Highest impact first", "Most bearish first"], horizontal=True)
+    # Filters row
+    nf_col1, nf_col2, nf_col3, nf_col4 = st.columns(4)
+    
+    with nf_col1:
+        default_start = pd.to_datetime(sd.prices.index[-min(30, len(sd.prices))].strftime("%Y-%m-%d")).date()
+        default_end = pd.to_datetime(sd.prices.index[-1].strftime("%Y-%m-%d")).date()
+        nf_start = st.date_input("Start Date", value=default_start, key="nf_start")
+        nf_end = st.date_input("End Date", value=default_end, key="nf_end")
+        
+    with nf_col2:
+        all_cats = list(set(n.category for n in sd.news))
+        nf_cats = st.multiselect("Category", all_cats, default=all_cats, key="nf_cat")
+        
+    with nf_col3:
+        all_impacts = ["High", "Medium", "Low"]
+        nf_impacts = st.multiselect("Impact", all_impacts, default=all_impacts, key="nf_impact")
+        
+    with nf_col4:
+        sort_order = st.selectbox("Sort by", ["Latest Date", "Highest Impact", "Highest Sentiment"], key="nf_sort")
 
-    sorted_news = filtered_news.copy()
-    if sort_order == "Newest first":
-        sorted_news = sorted(sorted_news, key=lambda n: n.date, reverse=True)
-    elif sort_order == "Highest impact first":
-        sorted_news = sorted(sorted_news, key=lambda n: abs(n.sentiment_score), reverse=True)
+    # Apply filters
+    st_date_str = nf_start.strftime("%Y-%m-%d")
+    ed_date_str = nf_end.strftime("%Y-%m-%d")
+    
+    feed_news = [n for n in sd.news if st_date_str <= n.date <= ed_date_str]
+    if nf_cats:
+        feed_news = [n for n in feed_news if n.category in nf_cats]
     else:
-        sorted_news = sorted(sorted_news, key=lambda n: n.sentiment_score)
+        feed_news = []
+        
+    if nf_impacts:
+        feed_news = [n for n in feed_news if n.impact.title() in nf_impacts]
+    else:
+        feed_news = []
+        
+    # Apply sort
+    impact_map = {"high": 3, "medium": 2, "low": 1}
+    if sort_order == "Latest Date":
+        feed_news.sort(key=lambda n: n.date, reverse=True)
+    elif sort_order == "Highest Impact":
+        feed_news.sort(key=lambda n: (impact_map.get(n.impact.lower(), 0), n.date), reverse=True)
+    else:
+        feed_news.sort(key=lambda n: (abs(n.sentiment_score), n.date), reverse=True)
+        
+    st.markdown(f"**Showing {len(feed_news)} events**")
 
-    for idx, event in enumerate(sorted_news):
+    for idx, event in enumerate(feed_news):
         style = CAT_BADGE_STYLES.get(event.category, "background:#eee;color:#333")
         sent_color = "#3B6D11" if event.sentiment == "bullish" else "#A32D2D" if event.sentiment == "bearish" else "#5F5E5A"
         sent_arrow = "▲" if event.sentiment == "bullish" else "▼" if event.sentiment == "bearish" else "●"
@@ -587,7 +674,7 @@ with tab3:
         with st.container():
             st.markdown(f"""
             <div class="news-card">
-                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+                <div style="display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; margin-bottom:4px; gap:8px;">
                     <div>
                         <span class="cat-badge" style="{style}">{event.category.title()}</span>
                         &nbsp;<span style="color:{sent_color};font-size:13px;font-weight:600">{sent_arrow} {event.sentiment.title()} ({event.sentiment_score:+.2f})</span>
