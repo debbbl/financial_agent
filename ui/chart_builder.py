@@ -151,6 +151,7 @@ def build_candlestick_chart(
             x0=selected_news_date, x1=selected_news_date,
             fillcolor="rgba(173,216,230,0.25)",
             line=dict(color="#4A90D9", width=1.5, dash="dash"),
+            layer="below",
         )
 
     # ── Selected range highlight ──────────────────────────────────────────
@@ -163,6 +164,7 @@ def build_candlestick_chart(
             annotation_text="Analysis range",
             annotation_position="top left",
             annotation_font=dict(size=11, color="#185FA5"),
+            layer="below",
         )
 
     # ── Layout ────────────────────────────────────────────────────────────

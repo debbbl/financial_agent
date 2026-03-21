@@ -421,6 +421,8 @@ def fetch_stock_data(ticker: str, period: str = "3mo", start: str = None, end: s
 
     hist = hist[["Open","High","Low","Close","Volume"]].copy()
     hist.index = pd.to_datetime(hist.index).tz_localize(None).normalize()
+    # Ensure index is unique to prevent duplicate dates on x-axis
+    hist = hist[~hist.index.duplicated(keep="last")]
 
     current_price = float(hist["Close"].iloc[-1])
     prev_close = float(hist["Close"].iloc[-2]) if len(hist) > 1 else current_price

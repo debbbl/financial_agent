@@ -137,6 +137,14 @@ if "selected_range" not in st.session_state:
     st.session_state.selected_range = None
 if "selected_news_date" not in st.session_state:
     st.session_state.selected_news_date = None
+if "selected_news_title" not in st.session_state:
+    st.session_state.selected_news_title = None
+if "dot_click_counter" not in st.session_state:
+    st.session_state.dot_click_counter = 0
+if "last_plotly_selection" not in st.session_state:
+    st.session_state.last_plotly_selection = None
+if "chart_key_counter" not in st.session_state:
+    st.session_state.chart_key_counter = 0
 if "active_tab" not in st.session_state:
     st.session_state.active_tab = "📊 Chart & Analysis"
 if "pending_query" not in st.session_state:
@@ -171,7 +179,7 @@ with st.sidebar:
     period_label = st.selectbox(
         "Date range",
         list(PERIOD_PRESETS.keys()),
-        index=2,
+        index=0,
         help="Choose a preset period or pick a custom date range",
     )
     period = PERIOD_PRESETS[period_label]
@@ -368,59 +376,71 @@ if active_tab == "📊 Chart & Analysis":
             use_container_width=True,
             on_select="rerun",
             selection_mode=["points", "box"],
-            key="main_chart"
+            key=f"main_chart_{st.session_state.chart_key_counter}"
         )
 
-        # Handle Plotly selection/click events
-        if chart_event and isinstance(chart_event, dict) and "selection" in chart_event:
-            sel = chart_event["selection"]
+        # Handle Plotly selection/click events using logic from reference
+        if chart_event and "selection" in chart_event:
+            sel    = chart_event["selection"]
             points = sel.get("points", [])
-            box = sel.get("box", [])
+            box    = sel.get("box", [])
 
-            # A: Drag selection (box)
+            # ── A: Drag box selection ─────────────────────────────────────────
             if box and len(box) > 0:
-                x_range = box[0].get("x", [])
-                if len(x_range) == 2:
-                    start_str = str(x_range[0])[:10]
-                    end_str   = str(x_range[1])[:10]
-                    st.session_state.selected_range  = (start_str, end_str)
-                    st.session_state.range_start_val = start_str
-                    st.session_state.range_end_val   = end_str
-                    st.session_state.pop("selected_news_date", None)
-            
-            # B: Single point click (points)
+                b = box[0]
+                # Plotly returns box range in different formats depending on version
+                x_start = b.get("x0") or (b.get("x", [None])[0] if isinstance(b.get("x"), list) and len(b.get("x", [])) >= 1 else None) or b.get("xmin")
+                x_end   = b.get("x1") or (b.get("x", [None, None])[1] if isinstance(b.get("x"), list) and len(b.get("x", [])) >= 2 else None) or b.get("xmax")
+
+                if x_start and x_end:
+                    start_str, end_str = str(x_start)[:10], str(x_end)[:10]
+                    if (st.session_state.get("range_start_val") != start_str or st.session_state.get("range_end_val") != end_str):
+                        st.session_state.selected_range        = (start_str, end_str)
+                        st.session_state.range_start_val       = start_str
+                        st.session_state.range_end_val         = end_str
+                        st.session_state.selected_news_date    = None
+                        st.session_state.selected_news_title   = None
+                        st.session_state.last_plotly_selection = None
+                        st.session_state.chart_key_counter    += 1
+                        # st.rerun()  # Removed to reduce flicker during drag
+
+            # ── B: Single dot click ───────────────────────────────────────────
             elif points and len(points) > 0:
-                pt = points[0]
+                pt = points[-1]
                 cd = pt.get("customdata")
-                
-                # Plotly customdata can be nested or flat depending on Streamlit version
-                # Dots: [headline, source, sentiment, score, date, ...]
-                extracted_date = None
-                
-                if isinstance(cd, list):
-                    # Check if it's the dot trace (len > 4) or candlestick (len 1)
-                    if len(cd) > 4:
-                        extracted_date = str(cd[4])[:10]
-                    elif len(cd) == 1 and isinstance(cd[0], int):
-                        # Candlestick: get date from x
-                        extracted_date = str(pt.get("x", ""))[:10]
-                
-                if not extracted_date:
-                    extracted_date = str(pt.get("x", ""))[:10]
-                
-                if extracted_date and len(extracted_date) >= 10:
-                    st.session_state.selected_news_date = extracted_date
-                    st.toast(f"Showing news for {extracted_date} 🔎", icon="📰")
-                    st.session_state.pop("selected_range", None)
-                    st.session_state.pop("range_start_val", None)
-                    st.session_state.pop("range_end_val", None)
-                    st.session_state.pop("last_auto_analyzed_range", None)
-                    st.session_state.pop("last_range_analysis_text", None)
-                    st.session_state.pop("last_analysis", None)
-            
-            # C: Empty selection (click background)
-            else:
-                pass # Removed auto-clear to prevent Streamlit rerun bug which hides the news and analysis.
+                extracted_date  = str(cd[4])[:10] if isinstance(cd, list) and len(cd) >= 5 else str(pt.get("x", ""))[:10]
+                extracted_title = cd[0] if isinstance(cd, list) and len(cd) >= 1 else None
+
+                if extracted_date and len(extracted_date) == 10:
+                    pt_x, pt_y, curve = str(pt.get("x", "")), round(float(pt.get("y", 0)), 4), str(pt.get("curve_number", ""))
+                    click_signature = f"{extracted_date}|{pt_x}|{pt_y}|{curve}|{st.session_state.dot_click_counter}"
+
+                    if click_signature != st.session_state.last_plotly_selection:
+                        st.session_state.selected_news_date    = extracted_date
+                        st.session_state.selected_news_title   = extracted_title
+                        st.session_state.dot_click_counter    += 1
+                        st.session_state.last_plotly_selection = click_signature
+                        st.session_state.selected_range        = None
+                        
+                        for k in ["range_start_val", "range_end_val", "last_auto_analyzed_range", "last_range_analysis_text", "last_analysis"]:
+                            st.session_state.pop(k, None)
+                        
+                        print(f"[Chart] Clicked dot: {extracted_date} | {extracted_title[:40]}...")
+                        st.session_state.chart_key_counter += 1
+                        # st.rerun()  # Removed to eliminate double-flicker
+
+            # ── C: Background click — clear all selection ─────────────────────
+            elif not points and not box:
+                if st.session_state.get("selected_news_date") or st.session_state.get("selected_range"):
+                    st.session_state.selected_news_date    = None
+                    st.session_state.selected_news_title   = None
+                    st.session_state.selected_range        = None
+                    st.session_state.last_plotly_selection = None
+                    st.session_state.dot_click_counter     = 0
+                    st.session_state.chart_key_counter    += 1
+                    for k in ["range_start_val", "range_end_val"]:
+                        st.session_state.pop(k, None)
+                    # st.rerun()  # Removed to eliminate double-flicker
 
 
         def render_news_card_html(ev):
@@ -512,11 +532,15 @@ if active_tab == "📊 Chart & Analysis":
             if st.session_state.get("selected_range"):
                 
                 if st.button("✕ Clear selection", key="reset_range"):
-                    st.session_state.pop("selected_range", None)
-                    st.session_state.pop("range_start_val", None)
-                    st.session_state.pop("range_end_val", None)
-                    st.session_state.pop("selected_news_date", None)
-                    st.session_state.pop("last_analysis", None)
+                    st.session_state.selected_range       = None
+                    st.session_state.selected_news_date   = None
+                    st.session_state.selected_news_title  = None
+                    st.session_state.last_plotly_selection = None
+                    st.session_state.dot_click_counter    = 0
+                    st.session_state.chart_key_counter   += 1
+                    for k in ["range_start_val","range_end_val","last_analysis",
+                              "last_auto_analyzed_range","last_range_analysis_text"]:
+                        st.session_state.pop(k, None)
                     st.rerun()
 
                 start_str, end_str = st.session_state.selected_range
@@ -590,14 +614,27 @@ if active_tab == "📊 Chart & Analysis":
             # Mode B: single dot clicked, no drag → show that dot's news only
             elif st.session_state.get("selected_news_date"):
                 if st.button("✕ Clear selection", key="reset_dot"):
-                    st.session_state.pop("selected_news_date", None)
+                    st.session_state.selected_news_date   = None
+                    st.session_state.selected_news_title  = None
+                    st.session_state.last_plotly_selection = None
+                    st.session_state.dot_click_counter    = 0
+                    st.session_state.chart_key_counter   += 1
                     st.rerun()
                 clicked_date = st.session_state.selected_news_date
-                dot_news = [n for n in filtered_news if n.date == clicked_date]
+                clicked_title = st.session_state.selected_news_title
+                
+                # Filter by BOTH date and title for exact match
+                if clicked_title:
+                    dot_news = [n for n in sd.news if n.date == clicked_date and n.title == clicked_title]
+                else:
+                    dot_news = [n for n in sd.news if n.date == clicked_date]
+                
+                print(f"[News Panel] Mode: Dot Click | Date: {clicked_date} | Title Match: {bool(clicked_title)} | Found: {len(dot_news)} events")
+                
                 if dot_news:
                     # Sort by absolute sentiment score (impact) descending
                     dot_news = sorted(dot_news, key=lambda n: abs(n.sentiment_score), reverse=True)
-                    st.markdown(f"**News on {clicked_date}**")
+                    st.markdown(f"**News on {clicked_date}** · {len(dot_news)} events")
                     
                     news_html_list = [render_news_card_html(ev) for ev in dot_news]
                     full_news_html = "".join(news_html_list)
@@ -615,7 +652,14 @@ if active_tab == "📊 Chart & Analysis":
                     else:
                         st.markdown(full_news_html, unsafe_allow_html=True)
                 else:
-                    st.caption("No news events found for that date.")
+                    # Fallback — display the literal headline captured during click
+                    fallback_title = st.session_state.get("selected_news_title")
+                    if fallback_title:
+                        st.markdown(f"**Event on {clicked_date}**")
+                        st.markdown(f"#### {fallback_title}")
+                        st.info("Additional archival details for this specific event are currently loading or unavailable in the primary feed.")
+                    else:
+                        st.caption(f"No news events recorded for {clicked_date}.")
 
             # Mode C: nothing selected → show placeholder
             else:
