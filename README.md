@@ -1,91 +1,66 @@
 # 📈 Financial Agent: Event-Driven Stock Analysis
 
-An intelligent financial analysis dashboard that overlays global news events onto stock price charts. Powered by **Agentic AI (Groq/Claude)**, this tool uses a ReAct reasoning loop to help investors understand the *why* behind price movements.
+An intelligent financial analysis dashboard built with **Streamlit** that overlays global news events onto interactive stock price charts. Powered by a **Multi-Agent System** (utilizing Groq API and LLMs like Llama 3/4), this platform automates the work of a financial research team to help investors understand the *why* behind price movements.
 
-## 🚀 Features
+## 🚀 Key Features
 
-- **📊 Event-Driven Charting**: Interactive Plotly candlestick charts with news event overlays. Hover over dots to see what happened on specific trading days.
-- **🤖 AI Range Analysis**: Select any date range on the chart to get an AI-generated explanation of the price action and key drivers.
-- **📰 Smart News Feed**: Highly filterable news feed with:
-  - **Quick Date Presets** (1W, 1M, 3M, 6M, YTD, MAX).
-  - **Zero-Typing Filters** for Category, Sentiment, and Impact.
-  - **Keyword Search** for deep dives into specific topics.
-- **🔮 Sentiment Forecasting**: 7-day and 30-day bullish/bearish probability based on aggregate news sentiment and AI analysis.
-- **💬 Agentic AI Chat**: A full-featured chat interface where the agent uses tools to:
-  - `analyze_price_range`
-  - `forecast_trend`
-  - `find_similar_periods`
-  - `summarize_news_category`
+- **🤖 Multi-Agent AI Orchestration**: 
+  - **Researcher Agent**: Autonomously calls tools to fetch real-time SEC filings, macroeconomic indicators (FRED), options flow, and news data.
+  - **Analyst Agent**: Synthesizes the raw data into a structured investment thesis with bull and bear cases.
+  - **Risk Manager Agent**: Acts as a devil's advocate to challenge the thesis and identify blind spots before presenting the final report.
+- **📊 Event-Driven Charting**: Interactive Plotly candlestick charts natively embed news events as sentiment-coded dots along the price timeline.
+- **⚡ Automated Range Analysis**: Simply drag to highlight a date range on the chart, and the Multi-Agent team will automatically generate a comprehensive report explaining the exact drivers of that period's price action.
+- **🧠 Persistent Memory & Pattern Matching**: Utilizes SQLite for session memory and ChromaDB for semantic vector search, allowing the agent to find historical market periods with similar setups.
+- **📰 Smart News Feed**: A highly filterable news feed featuring zero-typing toggles for category, sentiment, and impact, plus deep keyword search.
 
-## 📖 How to Use
+## 📖 Platform Usage Guide
 
-1. **Load Data**: Enter your Groq API Key and select a ticker (e.g., AAPL, NVDA) in the sidebar. Click **"Load Stock Data"**.
-2. **Explore the Chart**:
-   - **Hover** over dots on the candlestick chart to view specific news events.
-   - **Click** a dot to pin its news details in the side panel.
-   - **Drag** a box over an area on the chart to select a date range.
-3. **Analyze Moves**: After selecting a range, the side panel will show the top news and an **"Analyze Range ✨"** button. Click it to get an AI breakdown of why the price moved.
-4. **News Feed Deep-Dive**: Switch to the **"News Feed"** tab to filter historical news using quick presets and category/impact toggles. Use the search bar to find specific keywords.
-5. **AI Chat**: Use the **"AI Chat"** tab to ask complex questions like *"Why did the stock dip in early March?"* or *"Compare recent earnings sentiment with last year."*
+1. **Initialization**: Enter your Groq API Key and select a target stock ticker (e.g., AAPL, NVDA, TSLA) in the left sidebar. Choose your desired historical viewing period and click **"Load Stock Data"**.
+2. **Interactive Charting**: 
+   - **Hover** over dots on the candlestick chart to instantly read news headlines, sources, and AI-scored sentiment.
+   - **Click** a dot to pin that day's news strictly to the side panel. 
+   - **Drag** a box over an area on the chart to select a date range. This will instantly trigger the AI team to analyze the movement and stream a **Range Analysis Report** directly to your screen.
+3. **Agentic Chat**: Navigate to the **"🤖 AI Chat"** tab to talk directly to your AI portfolio manager. Click on predefined **Quick AI Queries** (like *"Why is the stock moving today?"*), or type your own complex questions. The orchestrator will dynamically adjust its format whether you're asking for a general overview or a specific data point.
+4. **News Feed Deep-Dive**: Switch to the **"📰 News Feed"** tab to filter through hundreds of historical news events. Quickly toggle Categories (Earnings, Product, Macro) and Sentiments (Bullish/Bearish) to isolate market catalysts.
 
-## 🛠️ Tech Stack
-
-- **Frontend**: [Streamlit](https://streamlit.io/) (Python-based interactive UI)
-- **AI Engine**: [Groq API](https://groq.com/) (using Llama 3 / Mixtral for high-speed reasoning)
-- **Data Source**: [yfinance](https://github.com/ranaroussi/yfinance) (Yahoo Finance API)
-- **Database**: 
-  - **SQLite**: Session management and chat history storage.
-  - **ChromaDB**: (Optional) Vector storage for RAG-based news retrieval.
-- **Visualization**: [Plotly](https://plotly.com/) for interactive financial charts.
-
-## 📦 Installation & Setup
+## 💻 Installation & Setup
 
 1. **Clone the repository**:
-
    ```bash
    git clone https://github.com/debbbl/financial_agent.git
    cd financial_agent
    ```
 
 2. **Set up a Virtual Environment**:
-
    ```bash
    python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   # On macOS/Linux:
+   source venv/bin/activate  
+   # On Windows: 
+   venv\Scripts\activate
    ```
 
 3. **Install Dependencies**:
-
    ```bash
    pip install -r requirements.txt
    ```
 
 4. **Configure Environment Variables**:
-   Create a `.env` file in the root directory:
-
+   Create a `.env` file in the root directory and add your Groq API key:
    ```env
-   GROQ_API_KEY=your_api_key_here
+   GROQ_API_KEY=your_groq_api_key_here
    ```
 
 5. **Run the Application**:
-
    ```bash
    streamlit run app.py
    ```
+   *The dashboard will automatically open in your default web browser at `http://localhost:8501`.*
 
-## 🏗️ Project Structure
+## 🛠️ Tech Stack
 
-- `app.py`: Main entry point and Streamlit UI definition.
-- `agents/`: AI logic and agentic tool-calling definitions.
-- `tools/`: Market data fetching, news processing, and sentiment analysis tools.
-- `ui/`: Custom chart builders and UI component definitions.
-- `database/`: DB initialization, session tracking, and persistence logic.
-- `tests/`: Unit and integration tests for the financial agent.
-
-## 🤝 Contributing
-
-Feel free to open issues or submit pull requests. For major changes, please open an issue first to discuss what you would like to change.
-
-## 📜 License
-
-[MIT](https://choosealicense.com/licenses/mit/)
+- **Frontend**: [Streamlit](https://streamlit.io/)
+- **AI Engine**: [Groq API](https://groq.com/) for ultra-low latency LLM inference
+- **Data Source**: [yfinance](https://github.com/ranaroussi/yfinance)
+- **Database**: SQLite (Relational State) & ChromaDB (Vector Embeddings)
+- **Visualization**: [Plotly](https://plotly.com/)
