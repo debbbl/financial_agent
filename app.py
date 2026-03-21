@@ -71,6 +71,37 @@ st.markdown("""
   .chat-msg-user { background: #e7f3ff; border-radius: 12px; padding: 10px 14px; margin: 6px 0; }
   .chat-msg-ai   { background: #f0fdf4; border-radius: 12px; padding: 10px 14px; margin: 6px 0; }
   .stSelectbox label { font-size: 13px !important; }
+  
+  /* Custom Tabs Styling */
+  div[data-testid="stHorizontalBlock"] div[data-testid="stVerticalBlock"] > div > div > div[role="radiogroup"] {
+      display: flex;
+      flex-direction: row;
+      gap: 0;
+      border-bottom: 2px solid #dee2e6;
+      margin-bottom: 20px;
+  }
+  div[role="radiogroup"] label {
+      padding: 10px 20px !important;
+      margin: 0 !important;
+      border-radius: 0 !important;
+      border: none !important;
+      background: transparent !important;
+      color: #6c757d !important;
+      font-weight: 500 !important;
+      cursor: pointer !important;
+  }
+  div[role="radiogroup"] label[data-checked="true"] {
+      color: #185FA5 !important;
+      border-bottom: 3px solid #185FA5 !important;
+      background: rgba(24, 95, 165, 0.05) !important;
+  }
+  div[role="radiogroup"] label div[data-testid="stMarkdownContainer"] p {
+      margin-bottom: 0 !important;
+  }
+  /* Hide the radio circle */
+  div[role="radiogroup"] label div[data-testid="stWidgetLabel"] div:first-child {
+      display: none !important;
+  }
 </style>
 """, unsafe_allow_html=True)
 
@@ -96,10 +127,12 @@ if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "selected_range" not in st.session_state:
     st.session_state.selected_range = None
-if "selected_news_event" not in st.session_state:
-    st.session_state.selected_news_event = None
 if "selected_news_date" not in st.session_state:
     st.session_state.selected_news_date = None
+if "active_tab" not in st.session_state:
+    st.session_state.active_tab = "📊 Chart & Analysis"
+if "pending_query" not in st.session_state:
+    st.session_state.pending_query = None
 
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -214,7 +247,11 @@ if load_btn:
                     )
                 else:
                     stock_data = fetch_stock_data(ticker, period=period)
-                agent = FinancialAgent(api_key=api_key, session_id=st.session_state.session_id)
+                agent = FinancialAgent(
+                    api_key=api_key, 
+                    session_id=st.session_state.session_id,
+                    model="meta-llama/llama-4-scout-17b-16e-instruct"
+                )
                 agent.set_stock_data(stock_data)
                 st.session_state.stock_data = stock_data
                 st.session_state.agent = agent
@@ -298,13 +335,20 @@ with m4:
 
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3 = st.tabs(["📊 Chart & Analysis", "🤖 AI Chat", "📰 News Feed"])
+# Custom tab implementation to allow programmatic switching
+tab_options = ["📊 Chart & Analysis", "🤖 AI Chat", "📰 News Feed"]
+active_tab = st.radio(
+    "Navigation", 
+    tab_options, 
+    index=tab_options.index(st.session_state.active_tab),
+    horizontal=True, 
+    label_visibility="collapsed",
+    key="nav_radio"
+)
+st.session_state.active_tab = active_tab
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 1 — Chart
-# ══════════════════════════════════════════════════════════════════════════════
-with tab1:
+# Use if/elif instead of 'with tabX'
+if active_tab == "📊 Chart & Analysis":
     col_chart, col_right = st.columns([3, 1])
 
     with col_chart:
@@ -338,6 +382,8 @@ with tab1:
                     st.session_state.selected_range  = (start_str, end_str)
                     st.session_state.range_start_val = start_str
                     st.session_state.range_end_val   = end_str
+                    # Clear single point selection if a range is dragged
+                    st.session_state.pop("selected_news_date", None)
             
             # B: Single point click (points)
             elif points and len(points) > 0:
@@ -354,11 +400,17 @@ with tab1:
                 
                 # Clear range if a single point is clicked
                 st.session_state.pop("selected_range", None)
+                st.session_state.pop("range_start_val", None)
+                st.session_state.pop("range_end_val", None)
+                st.session_state.pop("last_analysis", None)
             
             # C: Empty selection (click background)
             else:
                 st.session_state.pop("selected_news_date", None)
                 st.session_state.pop("selected_range", None)
+                st.session_state.pop("range_start_val", None)
+                st.session_state.pop("range_end_val", None)
+                st.session_state.pop("last_analysis", None)
 
 
         def render_news_card_html(ev):
@@ -428,6 +480,15 @@ with tab1:
             )
         with r_col3:
             analyze_btn = st.button("Analyze Range ✨", type="primary", use_container_width=True)
+            if analyze_btn:
+                st.session_state.pending_query = (
+                    f"Analyze the price movement in {sd.ticker} from "
+                    f"{range_start.strftime('%Y-%m-%d')} to {range_end.strftime('%Y-%m-%d')}. "
+                    f"Use your tools to examine the price action and explain what news events "
+                    f"drove the movement. Be specific."
+                )
+                st.session_state.active_tab = "🤖 AI Chat"
+                st.rerun()
 
         # Auto-trigger if range was set by drag (not just default)
         range_was_dragged = (
@@ -478,34 +539,28 @@ with tab1:
                     )
                 
                 # Render AI analysis
-                if analyze_btn or range_was_dragged:
-                    if start_str >= end_str:
-                        st.warning("Start date must be before end date.")
-                    else:
-                        # Clear the drag flag so it doesn't re-trigger on next rerun
-                        st.session_state.pop("range_start_val", None)
-                        st.session_state.pop("range_end_val",   None)
-
-                        with st.spinner("AI is analyzing this price range..."):
-                            question = (
-                                f"Analyze the price movement in {sd.ticker} from "
-                                f"{start_str} to {end_str}. Use your tools to examine "
-                                f"the price action and explain what news events drove "
-                                f"the movement. Be specific and educational for a beginner investor."
-                            )
-                            answer = st.session_state.agent.chat(question)
-                            st.session_state.chat_history.append(("Range Analysis", answer))
-                            st.session_state.last_analysis = answer
+                if range_was_dragged:
+                    # Clear the drag flag so it doesn't re-trigger on next rerun
+                    st.session_state.pop("range_start_val", None)
+                    st.session_state.pop("range_end_val",   None)
+                    
+                    st.session_state.pending_query = (
+                        f"Analyze the price movement in {sd.ticker} from "
+                        f"{start_str} to {end_str}. Use your tools to examine "
+                        f"the price action and explain what news events drove "
+                        f"the movement."
+                    )
+                    st.session_state.active_tab = "🤖 AI Chat"
+                    st.rerun()
                 
-                if st.session_state.get("last_analysis"):
-                    st.markdown("#### AI Range Explanation")
-                    st.info(st.session_state.last_analysis)
 
             # Mode B: single dot clicked, no drag → show that dot's news only
             elif st.session_state.get("selected_news_date"):
                 clicked_date = st.session_state.selected_news_date
                 dot_news = [n for n in filtered_news if n.date == clicked_date]
                 if dot_news:
+                    # Sort by absolute sentiment score (impact) descending
+                    dot_news = sorted(dot_news, key=lambda n: abs(n.sentiment_score), reverse=True)
                     st.markdown(f"**News on {clicked_date}**")
                     
                     news_html_list = [render_news_card_html(ev) for ev in dot_news]
@@ -550,9 +605,8 @@ with tab1:
         ]
         for q in quick_questions:
             if st.button(q, use_container_width=True, key=f"quick_{q[:20]}"):
-                with st.spinner("Analyzing..."):
-                    answer = st.session_state.agent.chat(q)
-                    st.session_state.chat_history.append((q, answer))
+                st.session_state.pending_query = q
+                st.session_state.active_tab = "🤖 AI Chat"
                 st.rerun()
 
         st.markdown("**Event Categories**")
@@ -573,8 +627,17 @@ with tab1:
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 2 — AI Chat
 # ══════════════════════════════════════════════════════════════════════════════
-with tab2:
+elif active_tab == "🤖 AI Chat":
     st.markdown(f"### Chat with your AI Financial Agent — {sd.ticker}")
+    
+    # Process pending query if exists
+    if st.session_state.get("pending_query"):
+        pq = st.session_state.pop("pending_query")
+        with st.spinner(f"Agent is analyzing: {pq}"):
+            st.session_state.chat_history.append(("You", pq))
+            answer = st.session_state.agent.chat(pq)
+            st.session_state.chat_history.append(("AI Agent", answer))
+
     st.caption(
         "The agent uses tool calls to fetch data before answering. "
         "It follows a ReAct loop: Think → Call tool → Observe result → Respond."
@@ -640,7 +703,7 @@ with tab2:
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 3 — News Feed
 # ══════════════════════════════════════════════════════════════════════════════
-with tab3:
+elif active_tab == "📰 News Feed":
     col_t1, col_t2 = st.columns([3, 1])
     with col_t1:
         st.markdown(f"### {sd.ticker} News Feed")

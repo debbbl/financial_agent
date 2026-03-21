@@ -1,9 +1,9 @@
 """
 agents/financial_agent.py — PRODUCTION VERSION with DB persistence
-Uses Groq (llama-3.3-70b-versatile) with:
-  - SQLite-persisted conversation history (survives page reloads)
-  - ChromaDB semantic pattern search (real vector similarity)
-  - SQL fallback for pattern matching when ChromaDB unavailable
+Reverted to Groq (meta-llama/llama-4-scout-17b-16e-instruct) with:
+  - Token-aware context management & adaptive history trimming
+  - SQLite-persisted conversation history
+  - ChromaDB semantic pattern search
 """
 
 import os
@@ -19,6 +19,7 @@ from database.db import (
 
 load_dotenv()
 
+# Standard OpenAI/Groq Tool format
 TOOLS = [
     {
         "type": "function",
@@ -187,13 +188,11 @@ def execute_tool(tool_name: str, tool_input: dict, stock_data: StockData) -> str
 class FinancialAgent:
     """
     Agentic AI using Groq with full DB persistence:
-    - Conversation history loaded from SQLite on init
-    - Every message saved to SQLite immediately
-    - Pattern matching uses ChromaDB vector search → SQL fallback
-    - Session survives page reloads
+    - Smart adaptive context management (retries on 413 errors)
+    - Token-aware history trimming
     """
 
-    def __init__(self, api_key: str, session_id: str, model: str = "llama-3.1-8b-instant"):
+    def __init__(self, api_key: str, session_id: str, model: str = "meta-llama/llama-4-scout-17b-16e-instruct"):
         self.client     = Groq(api_key=api_key)
         self.model      = model
         self.session_id = session_id
@@ -224,15 +223,33 @@ Always call the relevant tools before giving your analysis. Think step by step."
     def set_stock_data(self, stock_data: StockData):
         self.stock_data = stock_data
 
-    def _trimmed_history(self, max_messages: int = 20) -> list[dict]:
+    def _estimate_tokens(self, text: str) -> int:
+        """Rough estimate of tokens: 4 characters per token."""
+        return len(text) // 4
+
+    def _trimmed_history(self, max_tokens: int = 4000) -> list[dict]:
         """Keep conversation history within token limits by trimming older messages."""
-        if len(self.conversation_history) <= max_messages:
-            return list(self.conversation_history)
-        return list(self.conversation_history[-max_messages:])
+        current_tokens = 0
+        valid_history = []
+        for msg in reversed(self.conversation_history):
+            content_tokens = self._estimate_tokens(msg.get("content", ""))
+            if current_tokens + content_tokens < max_tokens:
+                valid_history.insert(0, msg)
+                current_tokens += content_tokens
+            else:
+                break
+        
+        trimmed_count = len(self.conversation_history) - len(valid_history)
+        if trimmed_count > 0:
+            print(f"[Agent] Trimmed {trimmed_count} old messages to stay under {max_tokens} tokens.")
+        return valid_history
 
     def chat(self, user_message: str) -> str:
         if not self.stock_data:
             return "Please load a stock first by selecting a ticker."
+
+        if self._estimate_tokens(user_message) > 4000:
+            return "Your message is too long for a single request. Please try splitting it."
 
         context = (
             f"[Context] Ticker: {self.stock_data.ticker} | "
@@ -246,86 +263,66 @@ Always call the relevant tools before giving your analysis. Think step by step."
         save_message(self.session_id, "user", full_message)
         self.conversation_history.append({"role": "user", "content": full_message})
 
-        max_iterations = 5
-        for _ in range(max_iterations):
+        max_context_tokens = 5000
+        for attempt in range(3):
             try:
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": self.system_prompt},
-                        *self._trimmed_history(),
-                    ],
-                    tools=TOOLS,
-                    tool_choice="auto",
-                    max_tokens=2048,
-                    temperature=0.3,
-                )
-            except Exception as api_err:
-                # If Groq rejects (e.g. bad tool params from prior turn), retry without tools
-                print(f"[Agent] API error, retrying without tools: {api_err}")
-                try:
+                trimmed_history = self._trimmed_history(max_tokens=max_context_tokens)
+                
+                max_iterations = 5
+                messages = [
+                    {"role": "system", "content": self.system_prompt},
+                    *trimmed_history
+                ]
+
+                for _ in range(max_iterations):
                     response = self.client.chat.completions.create(
                         model=self.model,
-                        messages=[
-                            {"role": "system", "content": self.system_prompt},
-                            {"role": "user", "content": full_message},
-                        ],
+                        messages=messages,
+                        tools=TOOLS,
+                        tool_choice="auto",
                         max_tokens=2048,
                         temperature=0.3,
                     )
-                    final = (response.choices[0].message.content or "").strip()
-                    save_message(self.session_id, "assistant", final)
-                    self.conversation_history.append({"role": "assistant", "content": final})
-                    return final
-                except Exception as retry_err:
-                    return f"Sorry, I encountered an error: {retry_err}"
 
-            msg = response.choices[0].message
+                    msg = response.choices[0].message
+                    if not msg.tool_calls:
+                        final = (msg.content or "").strip()
+                        save_message(self.session_id, "assistant", final)
+                        self.conversation_history.append({"role": "assistant", "content": final})
+                        return final
 
-            if not msg.tool_calls:
-                final = (msg.content or "").strip()
-                # Save assistant response to DB
-                save_message(self.session_id, "assistant", final)
-                self.conversation_history.append({"role": "assistant", "content": final})
-                return final
+                    tc_list = [
+                        {"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                        for tc in msg.tool_calls
+                    ]
+                    # Persistence of assistant message with tool calls
+                    save_message(self.session_id, "assistant", msg.content or "", tool_calls=tc_list)
+                    self.conversation_history.append({"role": "assistant", "content": msg.content or "", "tool_calls": tc_list})
+                    messages.append({"role": "assistant", "content": msg.content, "tool_calls": tc_list})
 
-            # Build tool_calls list for DB storage
-            tc_list = [
-                {"id": tc.id, "type": "function",
-                 "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
-                for tc in msg.tool_calls
-            ]
+                    for tc in msg.tool_calls:
+                        try:
+                            tool_input = json.loads(tc.function.arguments)
+                            result = execute_tool(tc.function.name, tool_input, self.stock_data)
+                        except Exception as tool_err:
+                            result = json.dumps({"error": f"Tool failed: {tool_err}"})
+                        
+                        save_message(self.session_id, "tool", result)
+                        self.conversation_history.append({"role": "tool", "content": result, "tool_call_id": tc.id, "name": tc.function.name})
+                        messages.append({"role": "tool", "tool_call_id": tc.id, "name": tc.function.name, "content": result})
 
-            # Save assistant message with tool calls to DB
-            save_message(self.session_id, "assistant", msg.content or "", tool_calls=tc_list)
-            self.conversation_history.append({
-                "role": "assistant",
-                "content": msg.content or "",
-                "tool_calls": tc_list,
-            })
+                return "Maximum reasoning steps reached."
 
-            # Execute tools and save results
-            for tc in msg.tool_calls:
-                try:
-                    tool_input = json.loads(tc.function.arguments)
-                except json.JSONDecodeError:
-                    tool_input = {}
+            except Exception as e:
+                err_str = str(e).lower()
+                if ("413" in err_str or "too large" in err_str or "rate limit" in err_str or "limit 6000" in err_str) and attempt < 2:
+                    print(f"[Agent] Payload too large or rate limit. Reducing context to {max_context_tokens // 2}...")
+                    max_context_tokens //= 2
+                    continue
+                else:
+                    return f"Error: {e}"
 
-                try:
-                    result = execute_tool(tc.function.name, tool_input, self.stock_data)
-                except Exception as tool_err:
-                    result = json.dumps({"error": f"Tool execution failed: {tool_err}"})
-
-                # Save tool result to DB
-                save_message(self.session_id, "tool", result)
-                self.conversation_history.append({
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "name": tc.function.name,
-                    "content": result,
-                })
-
-        return "I reached the maximum reasoning steps. Please try rephrasing your question."
+        return "Persistent token limit issues. Please try a shorter question."
 
     def reset_conversation(self):
         """Clear history from both memory and DB."""
