@@ -129,9 +129,9 @@ def build_candlestick_chart(
                 mode="markers",
                 marker=dict(
                     symbol=dot_symbols,
-                    size=10,
+                    size=14,  # Increased for easier clicking
                     color=cat_color,
-                    line=dict(color="white", width=1.5),
+                    line=dict(color="white", width=2),
                 ),
                 name=category.replace("_", " ").title(),
                 legendgroup=category,

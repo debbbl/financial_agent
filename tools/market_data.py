@@ -22,6 +22,9 @@ from dataclasses import dataclass
 from typing import Optional
 from urllib.parse import quote_plus
 from dotenv import load_dotenv
+from transformers import pipeline
+from fredapi import Fred
+
 
 load_dotenv()
 
@@ -75,7 +78,7 @@ def classify_category(text: str) -> str:
     return best if scores[best] > 0 else "market"
 
 
-def score_sentiment(text: str) -> tuple:
+def _keyword_sentiment_fallback(text: str) -> tuple:
     t = (text or "").lower()
     bull = sum(1 for kw in BULLISH_KEYWORDS if kw in t)
     bear = sum(1 for kw in BEARISH_KEYWORDS if kw in t)
@@ -86,6 +89,92 @@ def score_sentiment(text: str) -> tuple:
     scaled = raw * min(1.0, total / 3)
     label = "bullish" if scaled > 0.15 else "bearish" if scaled < -0.15 else "neutral"
     return label, round(max(-1.0, min(1.0, scaled)), 3)
+
+
+# Load once at module level — avoids reloading on every call
+_finbert_pipeline = None
+
+def get_finbert():
+    global _finbert_pipeline
+    if _finbert_pipeline is None:
+        import os
+        # Simple check: the model usually lives in ~/.cache/huggingface/hub/models--ProsusAI--finbert
+        # This isn't perfect but allows us to log "Downloading" vs "Loaded from cache"
+        cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "hub")
+        model_cache_path = os.path.join(cache_dir, "models--ProsusAI--finbert")
+        
+        if os.path.exists(model_cache_path):
+            print("[FinBERT] Model loaded from cache")
+        else:
+            print("[FinBERT] Downloading model (~440MB)...")
+            
+        _finbert_pipeline = pipeline(
+            "text-classification",
+            model="ProsusAI/finbert",
+            tokenizer="ProsusAI/finbert",
+            top_k=None,       # return all 3 label scores
+            truncation=True,
+            max_length=512,
+        )
+    return _finbert_pipeline
+
+
+def score_sentiment(text: str) -> tuple[str, float]:
+    """
+    FinBERT-based sentiment scorer.
+    Returns (sentiment_label, score) where score is in [-1.0, +1.0].
+    Falls back to keyword scoring if model unavailable.
+    """
+    if not text or len(text.strip()) < 5:
+        return "neutral", 0.0
+    try:
+        finbert = get_finbert()
+        # Truncate to 512 for BERT model limits
+        results = finbert(text[:512])[0]
+        scores = {r["label"]: r["score"] for r in results}
+        positive = scores.get("positive", 0.0)
+        negative = scores.get("negative", 0.0)
+        neutral  = scores.get("neutral",  0.0)
+        # Composite score: positive pulls toward +1, negative toward -1
+        score = positive - negative
+        if positive > negative and positive > neutral:
+            label = "bullish"
+        elif negative > positive and negative > neutral:
+            label = "bearish"
+        else:
+            label = "neutral"
+        return label, round(max(-1.0, min(1.0, score)), 3)
+    except Exception as e:
+        return _keyword_sentiment_fallback(text)
+
+
+def score_sentiment_batch(texts: list[str]) -> list[tuple[str, float]]:
+    """
+    Batched FinBERT sentiment scoring for massive speedup.
+    """
+    if not texts: return []
+    try:
+        finbert = get_finbert()
+        # Process in batches of 16 to avoid memory spikes
+        batch_size = 16
+        all_results = []
+        for i in range(0, len(texts), batch_size):
+            batch = [t[:512] for t in texts[i:i+batch_size]]
+            all_results.extend(finbert(batch))
+        
+        final = []
+        for results in all_results:
+            # results is a list of 3 dicts [pos, neg, neut] or similar
+            scores = {r["label"]: r["score"] for r in results}
+            pos, neg, neut = scores.get("positive", 0.0), scores.get("negative", 0.0), scores.get("neutral", 0.0)
+            score = pos - neg
+            label = "bullish" if pos > neg and pos > neut else "bearish" if neg > pos and neg > neut else "neutral"
+            final.append((label, round(max(-1.0, min(1.0, score)), 3)))
+        return final
+    except Exception as e:
+        print(f"[FinBERT] Batch fallback: {e}")
+        return [score_sentiment(t) for t in texts]
+
 
 
 def derive_impact(score: float, source: str) -> str:
@@ -108,18 +197,35 @@ def _is_cached(key: str) -> bool:
 
 def _normalise(raw_events: list) -> list:
     events, seen = [], set()
+    to_score = []
+    
+    # Pre-filter duplicates and collect texts for batching
+    unique_raw = []
     for item in raw_events:
         title = (item.get("title") or "").strip()
         if not title or title in seen: continue
         seen.add(title)
         full = title + " " + (item.get("summary") or "")
-        sent_label, sent_score = score_sentiment(full)
-        category = item.get("category") or classify_category(full)
+        unique_raw.append((item, full))
+        # Only score if AV didn't already provide it
+        if "sentiment" not in item:
+            to_score.append(full)
+            
+    # Batch sentiment scoring
+    scored_results = score_sentiment_batch(to_score)
+    score_idx = 0
+    
+    for item, full in unique_raw:
         if "sentiment" in item and "sentiment_score" in item:
             sent_label = item["sentiment"]
             sent_score = item["sentiment_score"]
+        else:
+            sent_label, sent_score = scored_results[score_idx]
+            score_idx += 1
+            
+        category = item.get("category") or classify_category(full)
         events.append(NewsEvent(
-            date=item["date"], title=title,
+            date=item["date"], title=item["title"],
             source=item.get("source","Unknown"),
             category=category, sentiment=sent_label,
             sentiment_score=sent_score,
@@ -277,12 +383,15 @@ def fetch_news_all_sources(ticker: str, start_date: str, end_date: str, days: in
         return _NEWS_CACHE[key][1]
 
     company = get_company_name(ticker)
-    print(f"\nFetching news for {ticker} ({company})...")
-    all_raw = []
-
-    all_raw.extend(fetch_from_finnhub(ticker, start_date, end_date))
-    all_raw.extend(fetch_from_alphavantage(ticker, days))
-    all_raw.extend(fetch_from_newsapi(ticker, company, min(days, 29)))
+    print(f"\n[Multi-Source] Fetching news for {ticker} ({company})...")
+    
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        f_finnhub = executor.submit(fetch_from_finnhub, ticker, start_date, end_date)
+        f_av      = executor.submit(fetch_from_alphavantage, ticker, days)
+        f_newsapi = executor.submit(fetch_from_newsapi, ticker, company, min(days, 29))
+        
+        all_raw = f_finnhub.result() + f_av.result() + f_newsapi.result()
 
     if len(all_raw) < 5:
         all_raw.extend(fetch_from_duckduckgo(ticker, company, days))
@@ -344,3 +453,172 @@ def filter_news(news: list, categories: Optional[list] = None, sentiments: Optio
 
 def get_range_news(news: list, start_date: str, end_date: str) -> list:
     return [n for n in news if start_date <= n.date <= end_date]
+
+
+# ── New Macro & Options Tools ────────────────────────────────────────────────
+
+FRED_INDICATORS = {
+    "DFF":    "Federal Funds Rate",
+    "CPIAUCSL": "CPI Inflation",
+    "UNRATE": "Unemployment Rate",
+    "T10Y2Y": "Yield Curve (10Y-2Y)",
+    "VIXCLS": "VIX Volatility Index",
+    "GDP":    "GDP Growth Rate",
+}
+
+def fetch_macro_context(start_date: str, end_date: str) -> dict:
+    """
+    Fetch key macro indicators from FRED for the given date range.
+    Returns latest value + 30-day change for each indicator.
+    """
+    fred_key = os.getenv("FRED_API_KEY", "")
+    if not fred_key or "your_fred_api_key" in fred_key:
+        return {"error": "FRED_API_KEY not set or invalid in .env"}
+    try:
+        fred = Fred(api_key=fred_key)
+        results = {}
+        for series_id, label in FRED_INDICATORS.items():
+            try:
+                series = fred.get_series(
+                    series_id,
+                    observation_start=start_date,
+                    observation_end=end_date
+                )
+                if not series.empty:
+                    latest   = round(float(series.iloc[-1]), 3)
+                    # Use previous observation for change if available
+                    previous = round(float(series.iloc[-2]), 3) if len(series) > 1 else latest
+                    results[series_id] = {
+                        "label":   label,
+                        "latest":  latest,
+                        "change":  round(latest - previous, 3),
+                        "trend":   "rising" if latest > previous else "falling",
+                    }
+            except Exception:
+                continue
+        print(f"[FRED] Fetched {len(results)} macro indicators")
+        return results
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def fetch_options_data(ticker: str) -> dict:
+    """
+    Fetch options chain data from yfinance.
+    Returns put/call ratio, implied volatility, and nearest expiry summary.
+    """
+    try:
+        stock = yf.Ticker(ticker)
+        expirations = stock.options
+        if not expirations:
+            return {"error": f"No options data available for {ticker}"}
+
+        # Use nearest expiry date
+        nearest = expirations[0]
+        chain   = stock.option_chain(nearest)
+        calls   = chain.calls
+        puts    = chain.puts
+
+        # Filter out rows with NaN in volume/iv before calculations
+        calls = calls.dropna(subset=["volume", "impliedVolatility"])
+        puts  = puts.dropna(subset=["volume", "impliedVolatility"])
+
+        call_volume = int(calls["volume"].sum())
+        put_volume  = int(puts["volume"].sum())
+        pcr = round(put_volume / call_volume, 3) if call_volume > 0 else None
+
+        avg_call_iv = round(float(calls["impliedVolatility"].mean()) * 100, 2) if not calls.empty else 0.0
+        avg_put_iv  = round(float(puts["impliedVolatility"].mean()) * 100, 2) if not puts.empty else 0.0
+
+        # Identify unusual activity — top 3 strikes by volume
+        top_calls = calls.nlargest(3, "volume")[["strike","volume","impliedVolatility"]].to_dict("records")
+        top_puts  = puts.nlargest(3,  "volume")[["strike","volume","impliedVolatility"]].to_dict("records")
+
+        sentiment = "bearish" if pcr and pcr > 1.2 else "bullish" if pcr and pcr < 0.8 else "neutral"
+
+        print(f"[Options] Fetched chain for {ticker} (nearest expiry: {nearest})")
+        return {
+            "ticker": ticker,
+            "nearest_expiry": nearest,
+            "call_volume": call_volume,
+            "put_volume":  put_volume,
+            "put_call_ratio": pcr,
+            "options_sentiment": sentiment,
+            "avg_call_iv_pct": avg_call_iv,
+            "avg_put_iv_pct":  avg_put_iv,
+            "top_call_strikes": top_calls,
+            "top_put_strikes":  top_puts,
+            "interpretation": (
+                f"PCR of {pcr} suggests {'bearish hedging' if pcr and pcr > 1 else 'bullish positioning'}. "
+                f"Average IV of {avg_call_iv}% on calls indicates "
+                f"{'elevated' if avg_call_iv > 30 else 'normal'} market uncertainty."
+            )
+        }
+    except Exception as e:
+        print(f"[Options] Error: {e}")
+        return {"error": str(e)}
+
+
+def fetch_sec_filings(ticker: str, filing_types: list = ["8-K", "10-Q", "10-K"]) -> dict:
+    """
+    Fetch recent SEC filings from EDGAR for a ticker.
+    No API key required — public endpoint.
+    Returns latest filings with date, type, and description.
+    """
+    try:
+        # Step 1: Get CIK number from ticker
+        # We'll use the SEC's CIK lookup atom feed
+        headers = {"User-Agent": "FinancialAgent research@example.com"}
+        cik_url  = f"https://www.sec.gov/cgi-bin/browse-edgar?company=&CIK={ticker}&type=10-K&dateb=&owner=include&count=1&search_text=&action=getcompany&output=atom"
+        resp     = requests.get(cik_url, headers=headers, timeout=20)
+        
+        import re
+        cik_match = re.search(r"CIK=(\d+)", resp.text)
+        if not cik_match:
+            return {"error": f"Could not find CIK for {ticker}"}
+        cik = cik_match.group(1).zfill(10)
+
+        # Step 2: Fetch recent filings from submissions endpoint
+        sub_url  = f"https://data.sec.gov/submissions/CIK{cik}.json"
+        sub_resp = requests.get(sub_url, headers=headers, timeout=20)
+        sub_resp.raise_for_status()
+        data     = sub_resp.json()
+
+        recent   = data.get("filings", {}).get("recent", {})
+        forms    = recent.get("form", [])
+        dates    = recent.get("filingDate", [])
+        accnos   = recent.get("accessionNumber", [])
+        descriptions = recent.get("primaryDocument", [])
+
+        filings = []
+        for form, date, accno, doc in zip(forms, dates, accnos, descriptions):
+            if form in filing_types:
+                filings.append({
+                    "type": form,
+                    "date": date,
+                    "description": _filing_description(form),
+                    "url": f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik}&type={form}&dateb=&owner=include&count=5",
+                })
+            if len(filings) >= 5:
+                break
+
+        print(f"[EDGAR] Found {len(filings)} filings for {ticker}")
+        return {
+            "ticker": ticker,
+            "company": data.get("name", ticker),
+            "recent_filings": filings,
+            "note": "Source: SEC EDGAR public API — no key required"
+        }
+    except Exception as e:
+        print(f"[EDGAR] Error: {e}")
+        return {"error": str(e)}
+
+def _filing_description(form: str) -> str:
+    return {
+        "8-K":  "Material event disclosure — earnings, M&A, leadership change",
+        "10-Q": "Quarterly financial report",
+        "10-K": "Annual financial report",
+        "4":    "Insider trading disclosure",
+        "SC 13G":"Large shareholder position filing",
+    }.get(form, "SEC filing")
+

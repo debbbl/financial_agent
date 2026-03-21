@@ -9,7 +9,15 @@ Run: streamlit run app.py
 import streamlit as st
 import os
 import json
+import inspect
 import textwrap
+import requests
+import warnings
+
+# Suppress persistent torch warning that floods logs and causes Streamlit issues
+os.environ["TORCH_LOGS"] = "-all"
+os.environ["TQDM_DISABLE"] = "1"
+warnings.filterwarnings("ignore", category=UserWarning, module="torch")
 from datetime import datetime, timedelta, date
 import pandas as pd
 from dotenv import load_dotenv
@@ -364,6 +372,7 @@ if active_tab == "📊 Chart & Analysis":
             fig,
             use_container_width=True,
             on_select="rerun",
+            selection_mode=["points", "box"],
             key="main_chart"
         )
 
@@ -382,35 +391,41 @@ if active_tab == "📊 Chart & Analysis":
                     st.session_state.selected_range  = (start_str, end_str)
                     st.session_state.range_start_val = start_str
                     st.session_state.range_end_val   = end_str
-                    # Clear single point selection if a range is dragged
                     st.session_state.pop("selected_news_date", None)
             
             # B: Single point click (points)
             elif points and len(points) > 0:
                 pt = points[0]
-                # Try to get date from customdata (index 4 for dots)
                 cd = pt.get("customdata")
-                if isinstance(cd, list) and len(cd) > 4:
-                    st.session_state.selected_news_date = str(cd[4])[:10]
-                else:
-                    # Fallback: get date from x coordinate
-                    clicked_x = pt.get("x")
-                    if clicked_x:
-                        st.session_state.selected_news_date = str(clicked_x)[:10]
                 
-                # Clear range if a single point is clicked
-                st.session_state.pop("selected_range", None)
-                st.session_state.pop("range_start_val", None)
-                st.session_state.pop("range_end_val", None)
-                st.session_state.pop("last_analysis", None)
+                # Plotly customdata can be nested or flat depending on Streamlit version
+                # Dots: [headline, source, sentiment, score, date, ...]
+                extracted_date = None
+                
+                if isinstance(cd, list):
+                    # Check if it's the dot trace (len > 4) or candlestick (len 1)
+                    if len(cd) > 4:
+                        extracted_date = str(cd[4])[:10]
+                    elif len(cd) == 1 and isinstance(cd[0], int):
+                        # Candlestick: get date from x
+                        extracted_date = str(pt.get("x", ""))[:10]
+                
+                if not extracted_date:
+                    extracted_date = str(pt.get("x", ""))[:10]
+                
+                if extracted_date and len(extracted_date) >= 10:
+                    st.session_state.selected_news_date = extracted_date
+                    st.toast(f"Showing news for {extracted_date} 🔎", icon="📰")
+                    st.session_state.pop("selected_range", None)
+                    st.session_state.pop("range_start_val", None)
+                    st.session_state.pop("range_end_val", None)
+                    st.session_state.pop("last_auto_analyzed_range", None)
+                    st.session_state.pop("last_range_analysis_text", None)
+                    st.session_state.pop("last_analysis", None)
             
             # C: Empty selection (click background)
             else:
-                st.session_state.pop("selected_news_date", None)
-                st.session_state.pop("selected_range", None)
-                st.session_state.pop("range_start_val", None)
-                st.session_state.pop("range_end_val", None)
-                st.session_state.pop("last_analysis", None)
+                pass # Removed auto-clear to prevent Streamlit rerun bug which hides the news and analysis.
 
 
         def render_news_card_html(ev):
@@ -537,25 +552,51 @@ if active_tab == "📊 Chart & Analysis":
                         f'</div>',
                         unsafe_allow_html=True
                     )
+                else:
+                    st.info("No news events found matching current filters for this date range.")
+
+                range_query = f"Provide a detailed analysis of {sd.ticker} from {st.session_state.range_start_val} to {st.session_state.range_end_val}. Focus on the news events and price action in this period."
+                current_range_key = f"{st.session_state.range_start_val}_{st.session_state.range_end_val}"
                 
-                # Render AI analysis
-                if range_was_dragged:
-                    # Clear the drag flag so it doesn't re-trigger on next rerun
-                    st.session_state.pop("range_start_val", None)
-                    st.session_state.pop("range_end_val",   None)
-                    
-                    st.session_state.pending_query = (
-                        f"Analyze the price movement in {sd.ticker} from "
-                        f"{start_str} to {end_str}. Use your tools to examine "
-                        f"the price action and explain what news events drove "
-                        f"the movement."
-                    )
-                    st.session_state.active_tab = "🤖 AI Chat"
-                    st.rerun()
+                # Automate analysis if not already done for this exact range
+                if st.session_state.get("last_auto_analyzed_range") != current_range_key:
+                    with st.status(f"🤖 AI Team analyzing {st.session_state.range_start_val} to {st.session_state.range_end_val}...", expanded=True) as status:
+                        result_placeholder = st.empty()
+                        full_response = ""
+                        
+                        for update in st.session_state.agent.chat_generator(range_query):
+                            if update["type"] == "status":
+                                st.write(update["content"])
+                            elif update["type"] == "stream":
+                                status.update(label="Range analysis complete!", state="complete", expanded=False)
+                                with st.container(border=True):
+                                    st.markdown("### 🤖 Range Analysis Report")
+                                    def stream_gen():
+                                        for chunk in update["content"]:
+                                            if chunk.choices[0].delta.content:
+                                                yield chunk.choices[0].delta.content
+                                    
+                                    full_response = st.write_stream(stream_gen())
+                                    st.session_state.agent.save_assistant_message(full_response)
+                                    st.session_state.last_auto_analyzed_range = current_range_key
+                                    st.session_state.last_range_analysis_text = full_response
+                                    st.rerun() # Refresh to show in stable state
+                            elif update["type"] == "error":
+                                status.update(label="Analysis failed!", state="error")
+                                st.error(update["content"])
+                else:
+                    with st.container(border=True):
+                        st.markdown("### 🤖 Range Analysis Report")
+                        st.markdown(st.session_state.get("last_range_analysis_text", ""))
+                # User can click 'Analyze Range' button to trigger AI analysis.
+                pass
                 
 
             # Mode B: single dot clicked, no drag → show that dot's news only
             elif st.session_state.get("selected_news_date"):
+                if st.button("✕ Clear selection", key="reset_dot"):
+                    st.session_state.pop("selected_news_date", None)
+                    st.rerun()
                 clicked_date = st.session_state.selected_news_date
                 dot_news = [n for n in filtered_news if n.date == clicked_date]
                 if dot_news:
@@ -633,26 +674,10 @@ elif active_tab == "🤖 AI Chat":
     # Process pending query if exists
     if st.session_state.get("pending_query"):
         pq = st.session_state.pop("pending_query")
-        with st.spinner(f"Agent is analyzing: {pq}"):
-            st.session_state.chat_history.append(("You", pq))
-            answer = st.session_state.agent.chat(pq)
-            st.session_state.chat_history.append(("AI Agent", answer))
+        st.session_state.chat_history.append(("You", pq))
+        st.rerun()
 
-    st.caption(
-        "The agent uses tool calls to fetch data before answering. "
-        "It follows a ReAct loop: Think → Call tool → Observe result → Respond."
-    )
-
-    # Display conversation
-    chat_container = st.container()
-    with chat_container:
-        for role, msg in st.session_state.chat_history:
-            if role == "You":
-                st.markdown(f'<div class="chat-msg-user"><b>You:</b> {msg}</div>', unsafe_allow_html=True)
-            else:
-                st.markdown(f'<div class="chat-msg-ai"><b>AI Agent:</b> {msg}</div>', unsafe_allow_html=True)
-
-    # Input
+    # Input Form at TOP
     with st.form("chat_form", clear_on_submit=True):
         user_input = st.text_area(
             "Ask anything about this stock",
@@ -671,9 +696,6 @@ elif active_tab == "🤖 AI Chat":
 
     if send_btn and user_input.strip():
         st.session_state.chat_history.append(("You", user_input))
-        with st.spinner("Agent is thinking (using tools)..."):
-            answer = st.session_state.agent.chat(user_input)
-        st.session_state.chat_history.append(("AI Agent", answer))
         st.rerun()
 
     if reset_btn:
@@ -681,22 +703,75 @@ elif active_tab == "🤖 AI Chat":
         st.session_state.agent.reset_conversation()
         st.rerun()
 
+    # Process latest message — Status & Streaming appear at the top of history
+    u_msg = None
+    if st.session_state.chat_history and st.session_state.chat_history[-1][0] == "You":
+        u_msg = st.session_state.chat_history[-1][1]
+        
+        # Display the user's message first
+        with st.chat_message("user"):
+            st.markdown(u_msg)
+            
+        with st.status("Agent team is working...", expanded=True) as status:
+            for update in st.session_state.agent.chat_generator(u_msg):
+                if update["type"] == "status":
+                    st.write(update["content"])
+                elif update["type"] == "stream":
+                    status.update(label="Multi-agent analysis complete!", state="complete", expanded=False)
+                    with st.chat_message("assistant"):
+                        def stream_gen():
+                            for chunk in update["content"]:
+                                if chunk.choices[0].delta.content:
+                                    yield chunk.choices[0].delta.content
+                                    
+                        full_response = st.write_stream(stream_gen())
+                        st.session_state.chat_history.append(("AI Agent", full_response))
+                        st.session_state.agent.save_assistant_message(full_response)
+                        st.rerun()
+                elif update["type"] == "error":
+                    status.update(label="Analysis failed!", state="error")
+                    st.error(update["content"])
+
+    st.caption(
+        "The agent uses a 3-agent team (Researcher → Analyst → Risk) to synthesize a professional report. "
+        "Every claim is grounded in real-time data and official filings."
+    )
+
+    # Display conversation — LATEST ON TOP
+    # Use a set to track displayed messages in this run to avoid duplicates
+    # while the 'Process latest message' block is active above.
+    already_displayed_u_msg_idx = len(st.session_state.chat_history) - 1 if (st.session_state.chat_history and st.session_state.chat_history[-1][0] == "You" and u_msg is not None) else -1
+
+    for idx, (role, msg) in enumerate(reversed(st.session_state.chat_history)):
+        # Calculate original index in chat_history
+        original_idx = len(st.session_state.chat_history) - 1 - idx
+        
+        # Skip the message if it was already rendered by the processing block above
+        if original_idx == already_displayed_u_msg_idx:
+            try:
+                # If we are currently in the 'Process latest message' block, this avoids double-rendering
+                if any("status" in frame.function for frame in inspect.stack()):
+                    continue
+            except: pass
+
+        if role == "You":
+            with st.chat_message("user"):
+                st.markdown(msg)
+        else:
+            with st.chat_message("assistant"):
+                st.markdown(msg)
+
     # Show agentic loop explainer
-    with st.expander("How the AI agent reasons (ReAct loop)"):
+    with st.expander("How the AI agent reasons (Multi-Agent Team)"):
         st.markdown("""
-        **Step 1 — Planning:** Claude receives your question + current stock context (price, ticker, news count).
+        **Step 1 — Research:** The `ResearcherAgent` uses tool calls to gather raw information:
+        - `analyze_price_range`, `get_macro_context`, `get_options_flow`, `get_sec_filings`, etc.
 
-        **Step 2 — Tool selection:** Claude decides which tools to call:
-        - `analyze_price_range` — fetch price stats + news for a date window
-        - `forecast_trend` — compute bullish/bearish probability
-        - `find_similar_periods` — pattern match to historical setups
-        - `summarize_news_category` — aggregate by news type
+        **Step 2 — Analysis:** The `AnalystAgent` reviews the research findings to build a structured investment thesis with Bull/Bear targets.
 
-        **Step 3 — Observation:** Tool results are fed back to Claude.
+        **Step 3 — Risk Assessment:** The `RiskAgent` acts as a devil's advocate, identifying blind spots and what could go wrong with the thesis.
 
-        **Step 4 — Synthesis:** Claude reads the structured data and generates a plain-English explanation.
-
-        This loop can repeat up to 5 times until Claude reaches a final answer.
+        **Step 4 — Synthesis:** The final response you see is a synthesis of all three expert perspectives.
         """)
 
 

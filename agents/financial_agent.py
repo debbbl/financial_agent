@@ -61,7 +61,7 @@ TOOLS = [
                 "type": "object",
                 "properties": {
                     "ticker": {"type": "string"},
-                    "current_sentiment_score": {"type": "number", "description": "Current sentiment score -1.0 to 1.0"},
+                    "current_sentiment_score": {"type": "string", "description": "Current sentiment score -1.0 to 1.0 (as a string)"},
                     "query_description": {"type": "string", "description": "Natural language description of current market setup for semantic search"},
                 },
                 "required": ["ticker", "current_sentiment_score"],
@@ -80,6 +80,57 @@ TOOLS = [
                     "category": {"type": "string", "enum": ["earnings","product","management","policy","market","competition"]},
                 },
                 "required": ["ticker", "category"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_macro_context",
+            "description": (
+                "Fetch current macroeconomic indicators from FRED — "
+                "interest rates, inflation, unemployment, yield curve, VIX. "
+                "Use this to contextualise stock movements within the broader economy."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "start_date": {"type": "string", "description": "Start date YYYY-MM-DD"},
+                    "end_date":   {"type": "string", "description": "End date YYYY-MM-DD"},
+                },
+                "required": ["start_date", "end_date"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_options_flow",
+            "description": (
+                "Fetch options chain data including put/call ratio, implied volatility, "
+                "and unusual options activity. Use to gauge institutional sentiment — "
+                "high PCR suggests bearish hedging, low PCR suggests bullish positioning."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ticker": {"type": "string"},
+                },
+                "required": ["ticker"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_sec_filings",
+            "description": "Fetch recent SEC regulatory filings for a company including 8-K material events, 10-Q quarterly reports, and 10-K annual reports from EDGAR.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ticker": {"type": "string"},
+                },
+                "required": ["ticker"],
             },
         },
     },
@@ -136,7 +187,7 @@ def execute_tool(tool_name: str, tool_input: dict, stock_data: StockData) -> str
 
     elif tool_name == "find_similar_periods":
         ticker  = tool_input["ticker"]
-        score   = tool_input["current_sentiment_score"]
+        score   = float(tool_input["current_sentiment_score"])
         query   = tool_input.get("query_description", f"{ticker} sentiment {score:+.2f}")
 
         # Try semantic vector search first
@@ -182,10 +233,98 @@ def execute_tool(tool_name: str, tool_input: dict, stock_data: StockData) -> str
                        for n in cat_news],
         })
 
+    elif tool_name == "get_macro_context":
+        from tools.market_data import fetch_macro_context
+        result = fetch_macro_context(
+            tool_input["start_date"],
+            tool_input["end_date"]
+        )
+        return json.dumps(result)
+
+    elif tool_name == "get_options_flow":
+        from tools.market_data import fetch_options_data
+        return json.dumps(fetch_options_data(tool_input["ticker"]))
+
+    elif tool_name == "get_sec_filings":
+        from tools.market_data import fetch_sec_filings
+        return json.dumps(fetch_sec_filings(tool_input["ticker"]))
+
     return json.dumps({"error": f"Unknown tool: {tool_name}"})
 
 
+class ResearcherAgent:
+    """Fetches and summarises raw data — news, prices, filings, macro."""
+    # TOOLS indices: 0: analyze_price_range, 2: find_similar_periods, 3: summarize_news_category, 4: get_macro_context, 5: get_options_flow, 6: get_sec_filings
+    TOOLS_SUBSET = [TOOLS[0], TOOLS[2], TOOLS[3], TOOLS[4], TOOLS[5], TOOLS[6]]
+    SYSTEM = """You are a financial research assistant. Your task is to gather 
+            raw data (prices, news, macro, filings, options) using your tools.
+            IMPORTANT: Use tools to find specific numbers and headlines. 
+            Do not provide any analysis or interpretation. 
+            Once you have all the data, provide a structured summary."""
+
+    REPORT_FORMAT = """
+            ## Price Action
+            - Period: [start] to [end]
+            - Change: [+/-X.X%]
+            - High: $X | Low: $X | Avg volume: X
+
+            ## News Summary ([N] events)
+            - [DATE] [CATEGORY] [BULLISH/BEARISH] — [headline]
+
+            ## Sentiment Score
+            - Overall: [score] ([Bullish/Bearish/Neutral])
+
+            ## Macro & Filings
+            - Fed rate: X% | CPI: X% | UNRATE: X%
+            - Last SEC Filing: [DATE] [TYPE]
+            - Put/Call ratio: X | Avg IV: X%
+            """
+
+class AnalystAgent:
+    """Interprets data and builds investment thesis."""
+    # TOOLS indices: 1: forecast_trend
+    TOOLS_SUBSET = [TOOLS[1]]
+    SYSTEM = """You are a senior financial analyst. Build a structured investment thesis 
+            based on research data.
+            Rules: Every claim MUST cite a specific data point from the research."""
+
+    REPORT_FORMAT = """
+            ## Investment Thesis — [TICKER]
+            **Verdict:** [BULLISH / BEARISH / NEUTRAL] ([X]% confidence)
+
+            ## Bull/Bear Case
+            - [Reason 1 with data]
+            - [Reason 2 with data]
+            - [Risk factor with data]
+
+            ## Price Scenarios (30d)
+            - Bull: +X% | Base: +/-X% | Bear: -X%
+            """
+
+class RiskAgent:
+    """Challenges the thesis and identifies blind spots."""
+    # TOOLS indices: None
+    TOOLS_SUBSET = []
+    SYSTEM = """You are a risk manager. Challenge the analyst thesis and identify blind spots.
+            BE DIRECT. CHALLENGE BIASES. FIND THE HOLES.
+            Output your assessment in the following format:"""
+
+    REPORT_FORMAT = """
+            ## Risk Assessment — [TICKER]
+            **Risk Level:** [LOW / MEDIUM / HIGH / CRITICAL]
+
+            ## Top Risks
+            1. **[Risk Name]**: [Explanation with data]
+            2. **[Risk Name]**: [Explanation with data]
+
+            ## Invalidation Triggers
+            - [Specific event that would prove thesis wrong]
+            - [Analyst oversight/bias identified]
+            """
+
+
 class FinancialAgent:
+
     """
     Agentic AI using Groq with full DB persistence:
     - Smart adaptive context management (retries on 413 errors)
@@ -202,23 +341,8 @@ class FinancialAgent:
         self.conversation_history: list[dict] = load_chat_history(session_id)
         print(f"[Agent] Loaded {len(self.conversation_history)} messages from DB for session {session_id[:8]}...")
 
-        self.system_prompt = """You are an expert financial analyst AI agent specialising in 
-event-driven market analysis. You help investors—especially beginners—understand WHY stocks 
-move by connecting price action to real news events and narratives.
+        self.system_prompt = """You are an expert financial analyst AI agent. You act as an orchestrator for a multi-agent team (Researcher, Analyst, Risk) to provide deep, evidence-based market analysis."""
 
-You have access to tools that let you:
-- Analyze specific date ranges on the chart to explain price movements
-- Generate AI forecasts based on news sentiment and momentum  
-- Find similar historical periods using semantic vector search over a real pattern database
-- Summarize news by category (earnings, policy, product, etc.)
-
-Your communication style:
-- Clear and educational — explain concepts simply for beginner investors
-- Evidence-based — always ground analysis in specific news events
-- Balanced — present both bullish and bearish perspectives
-- Actionable — give concrete takeaways, not vague generalities
-
-Always call the relevant tools before giving your analysis. Think step by step."""
 
     def set_stock_data(self, stock_data: StockData):
         self.stock_data = stock_data
@@ -263,66 +387,208 @@ Always call the relevant tools before giving your analysis. Think step by step."
         save_message(self.session_id, "user", full_message)
         self.conversation_history.append({"role": "user", "content": full_message})
 
-        max_context_tokens = 5000
-        for attempt in range(3):
-            try:
-                trimmed_history = self._trimmed_history(max_tokens=max_context_tokens)
+        print(f"\n[Multi-Agent] Starting analysis for {self.stock_data.ticker}...")
+
+        # Step 1: Researcher gathers data
+        print("[Multi-Agent] Step 1: Researcher gathering data...")
+        research = self._run_subagent(ResearcherAgent, user_message)
+
+        # Step 2: Analyst builds thesis from research
+        print("[Multi-Agent] Step 2: Analyst building thesis...")
+        analyst_input = f"Research findings:\n{research}\n\nUser question: {user_message}"
+        thesis = self._run_subagent(AnalystAgent, analyst_input)
+
+        # Step 3: Risk agent challenges thesis
+        print("[Multi-Agent] Step 3: Risk Manager identifying blind spots...")
+        risk_input = f"Investment thesis:\n{thesis}"
+        risks = self._run_subagent(RiskAgent, risk_input)
+
+        save_message(self.session_id, "assistant", final)
+        self.conversation_history.append({"role": "assistant", "content": final})
+        return final
+
+    def chat_generator(self, user_message: str):
+        """
+        Generator version of chat() that yields status updates and then the final token stream.
+        Yields: {"type": "status", "content": str} or {"type": "stream", "content": generator}
+        """
+        if not self.stock_data:
+            yield {"type": "error", "content": "Please load a stock first by selecting a ticker."}
+            return
+
+        # Save raw user message (don't inject context here to avoid confusing tool callers)
+        save_message(self.session_id, "user", user_message)
+        self.conversation_history.append({"role": "user", "content": user_message})
+
+        print(f"\n[Multi-Agent] Starting analysis for {self.stock_data.ticker}...")
+
+        # Step 1: Research
+        print("[Multi-Agent] Step 1: Researcher gathering data...")
+        yield {"type": "status", "content": "Researcher: Gathering price action, news, macro, and SEC data..."}
+        research = self._run_subagent(ResearcherAgent, user_message)
+        
+        # Step 2: Analysis
+        print("[Multi-Agent] Step 2: Analyst building thesis...")
+        yield {"type": "status", "content": "Analyst: Interpreting research and building investment thesis..."}
+        analyst_input = f"Research findings:\n{research}\n\nUser question: {user_message}"
+        thesis = self._run_subagent(AnalystAgent, analyst_input)
+        
+        # Step 3: Risk
+        print("[Multi-Agent] Step 3: Risk Manager identifying blind spots...")
+        yield {"type": "status", "content": "Risk Manager: Identifying blind spots and challenging the thesis..."}
+        risk_input = f"Investment thesis:\n{thesis}"
+        risks = self._run_subagent(RiskAgent, risk_input)
+        
+        # Step 4: Synthesis
+        print("[Multi-Agent] Synthesis: Compiling final client-ready report...")
+        yield {"type": "status", "content": "Synthesis: Compiling final client-ready report..."}
+        # Get the stream
+        stream = self._synthesise(user_message, research, thesis, risks, stream=True)
+        
+        yield {"type": "stream", "content": stream}
+
+    def _run_subagent(self, agent_class, message: str) -> str:
+        """Runs a specialised subagent with its own prompt and tools."""
+        # Stage 1: Discovery/Gathering Prompt
+        base_system_prompt = agent_class.SYSTEM
+        if self.stock_data:
+            base_system_prompt += f"\n\nCONTEXT: You are researching {self.stock_data.ticker} (current price ${self.stock_data.current_price:.2f})."
+        
+        # Add strict tool-use rule
+        if agent_class.TOOLS_SUBSET:
+            base_system_prompt += "\n\nCRITICAL RULE: If you call a tool, you MUST NOT output any other text (no headers, no report). ONLY provide your report once ALL data is gathered via multiple tool calls."
+
+        # For subagents, DO NOT inject the full conversation history. 
+        # Full history contains past formatted reports which causes "format leakage" 
+        # and triggers the Groq 400 error when the model tries to few-shot mimic 
+        # past formatting instead of calling tools.
+        messages = [
+            {"role": "system", "content": base_system_prompt},
+            {"role": "user", "content": f"User Request: {message}"}
+        ]
+
+        max_iterations = 5
+        for _ in range(max_iterations):
+            # Groq/OpenAI: only pass tools/tool_choice if tools are actually provided
+            kwargs = {
+                "model": self.model,
+                "messages": messages,
+                "max_tokens": 2048,
+                "temperature": 0.2,
+            }
+            if agent_class.TOOLS_SUBSET:
+                kwargs["tools"] = agent_class.TOOLS_SUBSET
+                kwargs["tool_choice"] = "auto"
+
+            # Stage 2: Dynamic Format Injection
+            # If we've already used tools (i > 0) OR if the subagent has NO tools (Risk agent), inject format
+            if hasattr(agent_class, 'REPORT_FORMAT'):
+                if _ > 0 or not agent_class.TOOLS_SUBSET:
+                    messages[0]["content"] = base_system_prompt + f"\n\nFINAL REPORTING FORMAT (Apply this now):\n{agent_class.REPORT_FORMAT}"
+                    kwargs.pop("tools", None)
+                    kwargs.pop("tool_choice", None)
+
+            response = self.client.chat.completions.create(**kwargs)
+
+            msg = response.choices[0].message
+            if not msg.tool_calls:
+                # If it's the first turn for an agent WITH tools, and they didn't call any, 
+                # they might be skipping the gathering. Let's force them to use tools if possible 
+                # or just return.
+                return (msg.content or "").strip()
+
+            tc_list = [
+                {"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                for tc in msg.tool_calls
+            ]
+            messages.append({"role": "assistant", "content": msg.content, "tool_calls": tc_list})
+
+            for tc in msg.tool_calls:
+                try:
+                    tool_input = json.loads(tc.function.arguments)
+                    print(f"  [Tool Call] {tc.function.name} with parameters: {tc.function.arguments}")
+                    result = execute_tool(tc.function.name, tool_input, self.stock_data)
+                except Exception as tool_err:
+                    result = json.dumps({"error": f"Tool failed: {tool_err}"})
                 
-                max_iterations = 5
-                messages = [
-                    {"role": "system", "content": self.system_prompt},
-                    *trimmed_history
-                ]
+                messages.append({"role": "tool", "tool_call_id": tc.id, "name": tc.function.name, "content": result})
 
-                for _ in range(max_iterations):
-                    response = self.client.chat.completions.create(
-                        model=self.model,
-                        messages=messages,
-                        tools=TOOLS,
-                        tool_choice="auto",
-                        max_tokens=2048,
-                        temperature=0.3,
-                    )
+        return "Subagent reached maximum iterations."
 
-                    msg = response.choices[0].message
-                    if not msg.tool_calls:
-                        final = (msg.content or "").strip()
-                        save_message(self.session_id, "assistant", final)
-                        self.conversation_history.append({"role": "assistant", "content": final})
-                        return final
+    def _synthesise(self, question, research, thesis, risks, stream=False) -> str:
+        """Combines all subagent perspectives into a final response."""
+        prompt = f"""You are the lead portfolio manager. Combine your team's work 
+        into a final client-ready report. Write for a beginner investor — 
+        clear, specific, no jargon without explanation.
 
-                    tc_list = [
-                        {"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
-                        for tc in msg.tool_calls
-                    ]
-                    # Persistence of assistant message with tool calls
-                    save_message(self.session_id, "assistant", msg.content or "", tool_calls=tc_list)
-                    self.conversation_history.append({"role": "assistant", "content": msg.content or "", "tool_calls": tc_list})
-                    messages.append({"role": "assistant", "content": msg.content, "tool_calls": tc_list})
+        User asked: {question}
 
-                    for tc in msg.tool_calls:
-                        try:
-                            tool_input = json.loads(tc.function.arguments)
-                            result = execute_tool(tc.function.name, tool_input, self.stock_data)
-                        except Exception as tool_err:
-                            result = json.dumps({"error": f"Tool failed: {tool_err}"})
-                        
-                        save_message(self.session_id, "tool", result)
-                        self.conversation_history.append({"role": "tool", "content": result, "tool_call_id": tc.id, "name": tc.function.name})
-                        messages.append({"role": "tool", "tool_call_id": tc.id, "name": tc.function.name, "content": result})
+        Research data:
+        {research}
 
-                return "Maximum reasoning steps reached."
+        Analyst thesis:
+        {thesis}
 
-            except Exception as e:
-                err_str = str(e).lower()
-                if ("413" in err_str or "too large" in err_str or "rate limit" in err_str or "limit 6000" in err_str) and attempt < 2:
-                    print(f"[Agent] Payload too large or rate limit. Reducing context to {max_context_tokens // 2}...")
-                    max_context_tokens //= 2
-                    continue
-                else:
-                    return f"Error: {e}"
+        Risk assessment:
+        {risks}
 
-        return "Persistent token limit issues. Please try a shorter question."
+        OUTPUT INSTRUCTIONS:
+        First and foremost, ANSWER THE USER'S SPECIFIC QUESTION directly and comprehensively.
+        Use the research, thesis, and risk assessment to provide a data-backed answer.
+        
+        If the user is asking for a general stock analysis (e.g. "Provide a detailed analysis of...", "What's the outlook?"), format your response exactly like this:
+        
+        ## [TICKER] Investment Summary
+        **Bottom line:** [One sentence verdict — bullish/bearish/neutral and why]
+        
+        ### What's driving the price
+        [2-3 sentences connecting specific news events to recent price movement. Name actual headlines.]
+        ### The bull case
+        [2-3 sentences. Specific catalysts with numbers.]
+        ### The bear case  
+        [2-3 sentences. Specific risks with numbers.]
+        ### What to watch
+        - [Specific upcoming event or metric to monitor]
+        ### Historical comparison
+        [1-2 sentences: "This setup is similar to [period] when [what happened]"]
+        ### Verdict for a beginner investor
+        [3-4 sentences. Plain English. What does this mean for buying/holding/selling? Include confidence level.]
+
+        BUT if the user asks a SPECIFIC targeted question (e.g. "Why is AAPL moving today?", "Summarize earnings", "What are the biggest risks?"), do NOT use the generic template above. Instead, write a clear, tailored response that directly answers their exact question. Use markdown appropriately to structure your targeted answer.
+
+        Rules for ALL responses:
+        - Every claim must reference a specific number or headline from the research
+        - No generic statements like "the market is uncertain"  
+        - Use bolding for key metrics and headlines
+        - Be concise but data-dense"""
+
+        messages = [
+            {"role": "system", "content": "You are a lead portfolio manager writing a client investment report."},
+            {"role": "user", "content": prompt}
+        ]
+
+        if stream:
+            return self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                max_tokens=2048,
+                temperature=0.3,
+                stream=True
+            )
+
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            max_tokens=2048,
+            temperature=0.3,
+            stream=False
+        )
+        return response.choices[0].message.content.strip()
+
+    def save_assistant_message(self, content: str):
+        """Helper to save the final streamed message to DB and history."""
+        save_message(self.session_id, "assistant", content)
+        self.conversation_history.append({"role": "assistant", "content": content})
 
     def reset_conversation(self):
         """Clear history from both memory and DB."""
