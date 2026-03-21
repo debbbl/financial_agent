@@ -13,4 +13,5 @@ chromadb==0.6.3
 sentence-transformers==3.4.1
 fredapi==0.5.2
 transformers==4.49.0
-torch==2.6.0
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
