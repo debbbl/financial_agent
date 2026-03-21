@@ -286,7 +286,9 @@ class AnalystAgent:
     TOOLS_SUBSET = [TOOLS[1]]
     SYSTEM = """You are a senior financial analyst. Build a structured investment thesis 
             based on research data.
-            Rules: Every claim MUST cite a specific data point from the research."""
+            Rules: 
+            1. Every claim MUST cite a specific data point from the research.
+            2. ONLY use the tools explicitly provided to you. DO NOT hallucinate tools."""
 
     REPORT_FORMAT = """
             ## Investment Thesis — [TICKER]
@@ -488,7 +490,21 @@ class FinancialAgent:
                     kwargs.pop("tools", None)
                     kwargs.pop("tool_choice", None)
 
-            response = self.client.chat.completions.create(**kwargs)
+            try:
+                response = self.client.chat.completions.create(**kwargs)
+            except Exception as e:
+                if "tool call validation failed" in str(e).lower():
+                    print(f"  [Warning] Intercepted hallucinated tool call. Recovering...")
+                    kwargs.pop("tools", None)
+                    kwargs.pop("tool_choice", None)
+                    # Add a strong reminder and retry
+                    messages.append({
+                        "role": "user", 
+                        "content": "SYSTEM OVERRIDE: You attempted to call a tool that is NOT in your provided tool list. Please fulfill the request using ONLY the information provided and available tools."
+                    })
+                    response = self.client.chat.completions.create(**kwargs)
+                else:
+                    raise e
 
             msg = response.choices[0].message
             if not msg.tool_calls:
