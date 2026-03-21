@@ -11,10 +11,11 @@ from tools.market_data import StockData, fetch_stock_data
 from database.db import create_session
 
 def test_multi_agent():
+    import streamlit as st
     load_dotenv()
-    api_key = os.getenv("GROQ_API_KEY")
+    api_key = st.secrets.get("GROQ_API_KEY")
     if not api_key:
-        print("GROQ_API_KEY not found in .env")
+        print("GROQ_API_KEY not found in Streamlit secrets")
         return
 
     print("--- Multi-Agent Architecture Verification ---")

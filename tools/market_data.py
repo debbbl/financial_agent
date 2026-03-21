@@ -28,9 +28,11 @@ from fredapi import Fred
 
 load_dotenv()
 
-FINNHUB_API_KEY      = os.getenv("FINNHUB_API_KEY", "")
-NEWSAPI_API_KEY      = os.getenv("NEWSAPI_API_KEY", "")
-ALPHAVANTAGE_API_KEY = os.getenv("ALPHAVANTAGE_API_KEY", "")
+import streamlit as st
+
+FINNHUB_API_KEY      = st.secrets.get("FINNHUB_API_KEY", "")
+NEWSAPI_API_KEY      = st.secrets.get("NEWSAPI_API_KEY", "")
+ALPHAVANTAGE_API_KEY = st.secrets.get("ALPHAVANTAGE_API_KEY", "")
 
 _NEWS_CACHE: dict = {}
 CACHE_TTL_SECONDS = 3600
@@ -471,9 +473,9 @@ def fetch_macro_context(start_date: str, end_date: str) -> dict:
     Fetch key macro indicators from FRED for the given date range.
     Returns latest value + 30-day change for each indicator.
     """
-    fred_key = os.getenv("FRED_API_KEY", "")
+    fred_key = st.secrets.get("FRED_API_KEY", "")
     if not fred_key or "your_fred_api_key" in fred_key:
-        return {"error": "FRED_API_KEY not set or invalid in .env"}
+        return {"error": "FRED_API_KEY not set or invalid in secrets.toml"}
     try:
         fred = Fred(api_key=fred_key)
         results = {}

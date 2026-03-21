@@ -149,12 +149,7 @@ with st.sidebar:
     st.caption("Event-Driven AI Stock Analyst")
     st.divider()
 
-    api_key = st.text_input(
-        "Groq API Key",
-        value=os.getenv("GROQ_API_KEY", ""),
-        type="password",
-        help="Get yours free at console.groq.com",
-    )
+    api_key = st.secrets["GROQ_API_KEY"]
 
     st.subheader("Stock Selection")
     ticker = st.selectbox("Ticker", POPULAR_TICKERS, index=0)
@@ -241,7 +236,7 @@ with st.sidebar:
 # ── Load stock data ───────────────────────────────────────────────────────────
 if load_btn:
     if not api_key:
-        st.error("Please enter your Groq API key in the sidebar.")
+        st.error("Please add your Groq API key to Streamlit secrets.")
     elif period == "custom" and custom_start and custom_end and custom_start >= custom_end:
         st.error("Start date must be before end date.")
     else:
