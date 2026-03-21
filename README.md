@@ -4,7 +4,7 @@ An intelligent financial analysis dashboard built with **Streamlit** that overla
 
 ## 🚀 Key Features
 
-- **🤖 Multi-Agent AI Orchestration**: 
+- **🤖 Multi-Agent AI Orchestration**:
   - **Researcher Agent**: Autonomously calls tools to fetch real-time SEC filings, macroeconomic indicators (FRED), options flow, and news data.
   - **Analyst Agent**: Synthesizes the raw data into a structured investment thesis with bull and bear cases.
   - **Risk Manager Agent**: Acts as a devil's advocate to challenge the thesis and identify blind spots before presenting the final report.
@@ -16,9 +16,9 @@ An intelligent financial analysis dashboard built with **Streamlit** that overla
 ## 📖 Platform Usage Guide
 
 1. **Initialization**: Enter your Groq API Key and select a target stock ticker (e.g., AAPL, NVDA, TSLA) in the left sidebar. Choose your desired historical viewing period and click **"Load Stock Data"**.
-2. **Interactive Charting**: 
+2. **Interactive Charting**:
    - **Hover** over dots on the candlestick chart to instantly read news headlines, sources, and AI-scored sentiment.
-   - **Click** a dot to pin that day's news strictly to the side panel. 
+   - **Click** a dot to pin that day's news strictly to the side panel.
    - **Drag** a box over an area on the chart to select a date range. This will instantly trigger the AI team to analyze the movement and stream a **Range Analysis Report** directly to your screen.
 3. **Agentic Chat**: Navigate to the **"🤖 AI Chat"** tab to talk directly to your AI portfolio manager. Click on predefined **Quick AI Queries** (like *"Why is the stock moving today?"*), or type your own complex questions. The orchestrator will dynamically adjust its format whether you're asking for a general overview or a specific data point.
 4. **News Feed Deep-Dive**: Switch to the **"📰 News Feed"** tab to filter through hundreds of historical news events. Quickly toggle Categories (Earnings, Product, Macro) and Sentiments (Bullish/Bearish) to isolate market catalysts.
@@ -26,12 +26,14 @@ An intelligent financial analysis dashboard built with **Streamlit** that overla
 ## 💻 Installation & Setup
 
 1. **Clone the repository**:
+
    ```bash
    git clone https://github.com/debbbl/financial_agent.git
    cd financial_agent
    ```
 
 2. **Set up a Virtual Environment**:
+
    ```bash
    python -m venv venv
    # On macOS/Linux:
@@ -41,26 +43,47 @@ An intelligent financial analysis dashboard built with **Streamlit** that overla
    ```
 
 3. **Install Dependencies**:
+
    ```bash
    pip install -r requirements.txt
    ```
 
 4. **Configure Environment Variables**:
    Create a `.env` file in the root directory and add your Groq API key:
+
    ```env
    GROQ_API_KEY=your_groq_api_key_here
    ```
 
 5. **Run the Application**:
+
    ```bash
    streamlit run app.py
    ```
+
    *The dashboard will automatically open in your default web browser at `http://localhost:8501`.*
 
-## 🛠️ Tech Stack
+## 🛠️ Tech Stack & Data Sources
+
+### Core Frameworks & AI
 
 - **Frontend**: [Streamlit](https://streamlit.io/)
 - **AI Engine**: [Groq API](https://groq.com/) for ultra-low latency LLM inference
-- **Data Source**: [yfinance](https://github.com/ranaroussi/yfinance)
+- **NLP Sentiment**: [ProsusAI/finbert](https://huggingface.co/ProsusAI/finbert) (HuggingFace Transformers) for deep financial text classification
 - **Database**: SQLite (Relational State) & ChromaDB (Vector Embeddings)
 - **Visualization**: [Plotly](https://plotly.com/)
+
+### Agent Tools & Market Data Providers
+
+- **Price Action & Options Flow**: [yfinance](https://github.com/ranaroussi/yfinance) (Historical OHLCV prices, volume, implied volatility, Put/Call ratios)
+- **Macroeconomics**: [FRED API](https://fred.stlouisfed.org/) (Federal Reserve Economic Data for interest rates, CPI, Unemployment, Yield Curve)
+- **Regulatory Filings**: [SEC EDGAR](https://www.sec.gov/edgar.shtml) Public API (Real-time extraction of 8-K, 10-Q, and 10-K corporate filings)
+
+### News Aggregation Pipeline
+
+The Researcher agent dynamically gathers real-time articles using a 4-tier robust fallback architecture:
+
+1. **Finnhub** (Primary, high-quality company-specific news)
+2. **Alpha Vantage** (Finance-focused feed with built-in topics)
+3. **NewsAPI** (Broad coverage across major global publishers)
+4. **DuckDuckGo** (Scraper-based fallback feed)
