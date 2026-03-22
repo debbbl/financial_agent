@@ -401,9 +401,8 @@ if active_tab == "📊 Chart & Analysis":
                         st.session_state.selected_news_date    = None
                         st.session_state.selected_news_title   = None
                         st.session_state.last_plotly_selection = None
-                        st.session_state.chart_key_counter    += 1
-                        # st.rerun()  # Removed to reduce flicker during drag
-
+                        # DO NOT increment chart_key_counter or call st.rerun() here. 
+                        # Streamlit natively reruns when a box is dragged and natively updates its own UI!
             # ── B: Single dot click ───────────────────────────────────────────
             elif points and len(points) > 0:
                 pt = points[-1]
@@ -415,32 +414,37 @@ if active_tab == "📊 Chart & Analysis":
                     pt_x, pt_y, curve = str(pt.get("x", "")), round(float(pt.get("y", 0)), 4), str(pt.get("curve_number", ""))
                     click_signature = f"{extracted_date}|{pt_x}|{pt_y}|{curve}|{st.session_state.dot_click_counter}"
 
-                    if click_signature != st.session_state.last_plotly_selection:
+                    current_sel = f"{extracted_date}|{extracted_title}"
+                    last_sel = f"{st.session_state.get('selected_news_date')}|{st.session_state.get('selected_news_title')}"
+
+                    if current_sel != last_sel:
+                        print(f"\n[Chart Debug] New Dot Click Detect! Date: {extracted_date} | Title: {extracted_title}")
                         st.session_state.selected_news_date    = extracted_date
                         st.session_state.selected_news_title   = extracted_title
-                        st.session_state.dot_click_counter    += 1
-                        st.session_state.last_plotly_selection = click_signature
                         st.session_state.selected_range        = None
                         
                         for k in ["range_start_val", "range_end_val", "last_auto_analyzed_range", "last_range_analysis_text", "last_analysis"]:
                             st.session_state.pop(k, None)
                         
-                        print(f"[Chart] Clicked dot: {extracted_date} | {extracted_title[:40]}...")
-                        st.session_state.chart_key_counter += 1
-                        # st.rerun()  # Removed to eliminate double-flicker
+                        # DO NOT increment chart_key_counter or call st.rerun() here!
+                        # Streamlit reruns natively when a dot is clicked, and Plotly natively handles the dot styling update.
+                    else:
+                        pass # Ignore exact duplicate of same signature
 
             # ── C: Background click — clear all selection ─────────────────────
             elif not points and not box:
-                if st.session_state.get("selected_news_date") or st.session_state.get("selected_range"):
+                if st.session_state.get("ignore_plotly_clear"):
+                    print("[Chart Debug] Plotly sent empty selection (likely due to forced remount). Consuming 'ignore_plotly_clear' flag to protect UI state.")
+                    st.session_state.ignore_plotly_clear = False
+                elif st.session_state.get("selected_news_date") or st.session_state.get("selected_range"):
+                    print("[Chart Debug] Genuine background click evaluated empty selection. Wiping python UI states.")
                     st.session_state.selected_news_date    = None
                     st.session_state.selected_news_title   = None
                     st.session_state.selected_range        = None
                     st.session_state.last_plotly_selection = None
-                    st.session_state.dot_click_counter     = 0
-                    st.session_state.chart_key_counter    += 1
                     for k in ["range_start_val", "range_end_val"]:
                         st.session_state.pop(k, None)
-                    # st.rerun()  # Removed to eliminate double-flicker
+                    # Notice we DO NOT increment chart_key here either! Plotly's UI is natively cleared when clicking background!
 
 
         def render_news_card_html(ev):
@@ -511,13 +515,18 @@ if active_tab == "📊 Chart & Analysis":
         with r_col3:
             analyze_btn = st.button("Analyze Range ✨", type="primary", use_container_width=True)
             if analyze_btn:
-                st.session_state.pending_query = (
-                    f"Analyze the price movement in {sd.ticker} from "
-                    f"{range_start.strftime('%Y-%m-%d')} to {range_end.strftime('%Y-%m-%d')}. "
-                    f"Use your tools to examine the price action and explain what news events "
-                    f"drove the movement. Be specific."
+                # Set range manually to trigger the auto-analysis in the container below
+                st.session_state.selected_range = (
+                    range_start.strftime('%Y-%m-%d'),
+                    range_end.strftime('%Y-%m-%d')
                 )
-                st.session_state.active_tab = "🤖 AI Chat"
+                st.session_state.range_start_val = range_start.strftime('%Y-%m-%d')
+                st.session_state.range_end_val = range_end.strftime('%Y-%m-%d')
+                st.session_state.selected_news_date = None
+                st.session_state.selected_news_title = None
+                st.session_state.last_plotly_selection = None
+                st.session_state.chart_key_counter += 1
+                st.session_state.ignore_plotly_clear = True
                 st.rerun()
 
         # Auto-trigger if range was set by drag (not just default)
@@ -574,41 +583,8 @@ if active_tab == "📊 Chart & Analysis":
                 else:
                     st.info("No news events found matching current filters for this date range.")
 
-                range_query = f"Provide a detailed analysis of {sd.ticker} from {st.session_state.range_start_val} to {st.session_state.range_end_val}. Focus on the news events and price action in this period."
-                current_range_key = f"{st.session_state.range_start_val}_{st.session_state.range_end_val}"
-                
-                # Automate analysis if not already done for this exact range
-                if st.session_state.get("last_auto_analyzed_range") != current_range_key:
-                    with st.status(f"🤖 AI Team analyzing {st.session_state.range_start_val} to {st.session_state.range_end_val}...", expanded=True) as status:
-                        result_placeholder = st.empty()
-                        full_response = ""
-                        
-                        for update in st.session_state.agent.chat_generator(range_query):
-                            if update["type"] == "status":
-                                st.write(update["content"])
-                            elif update["type"] == "stream":
-                                status.update(label="Range analysis complete!", state="complete", expanded=False)
-                                with st.container(border=True):
-                                    st.markdown("### 🤖 Range Analysis Report")
-                                    def stream_gen():
-                                        for chunk in update["content"]:
-                                            if chunk.choices[0].delta.content:
-                                                yield chunk.choices[0].delta.content
-                                    
-                                    full_response = st.write_stream(stream_gen())
-                                    st.session_state.agent.save_assistant_message(full_response)
-                                    st.session_state.last_auto_analyzed_range = current_range_key
-                                    st.session_state.last_range_analysis_text = full_response
-                                    st.rerun() # Refresh to show in stable state
-                            elif update["type"] == "error":
-                                status.update(label="Analysis failed!", state="error")
-                                st.error(update["content"])
-                else:
-                    with st.container(border=True):
-                        st.markdown("### 🤖 Range Analysis Report")
-                        st.markdown(st.session_state.get("last_range_analysis_text", ""))
-                # User can click 'Analyze Range' button to trigger AI analysis.
-                pass
+                # (Analysis block moved outside of panel_container)
+
                 
 
             # Mode B: single dot clicked, no drag → show that dot's news only
@@ -623,11 +599,11 @@ if active_tab == "📊 Chart & Analysis":
                 clicked_date = st.session_state.selected_news_date
                 clicked_title = st.session_state.selected_news_title
                 
-                # Filter by BOTH date and title for exact match
+                # Filter by BOTH date and title for exact match from the filtered news list
                 if clicked_title:
-                    dot_news = [n for n in sd.news if n.date == clicked_date and n.title == clicked_title]
+                    dot_news = [n for n in filtered_news if n.date == clicked_date and n.title == clicked_title]
                 else:
-                    dot_news = [n for n in sd.news if n.date == clicked_date]
+                    dot_news = [n for n in filtered_news if n.date == clicked_date]
                 
                 print(f"[News Panel] Mode: Dot Click | Date: {clicked_date} | Title Match: {bool(clicked_title)} | Found: {len(dot_news)} events")
                 
@@ -665,7 +641,47 @@ if active_tab == "📊 Chart & Analysis":
             else:
                 st.caption("Click a dot to see news details · Drag on the chart to select a range for AI analysis")
 
+        # Range Analysis Result Block (Displayed outside the news panel)
+        if st.session_state.get("selected_range") and "range_start_val" in st.session_state and "range_end_val" in st.session_state:
+            st.markdown("<br>", unsafe_allow_html=True)
+            range_query = f"Provide a detailed analysis of {sd.ticker} from {st.session_state.range_start_val} to {st.session_state.range_end_val}. Focus on the news events and price action in this period."
+            current_range_key = f"{st.session_state.range_start_val}_{st.session_state.range_end_val}"
+            
+            # Automate analysis if not already done for this exact range
+            if st.session_state.get("last_auto_analyzed_range") != current_range_key:
+                with st.status(f"🤖 AI Team analyzing {st.session_state.range_start_val} to {st.session_state.range_end_val}...", expanded=True) as status:
+                    result_placeholder = st.empty()
+                    full_response = ""
+                    
+                    for update in st.session_state.agent.chat_generator(range_query):
+                        if update["type"] == "status":
+                            st.write(update["content"])
+                        elif update["type"] == "stream":
+                            status.update(label="Range analysis complete!", state="complete", expanded=False)
+                            with st.container(border=False):
+                                st.markdown(f"### 🤖 Analysis: {st.session_state.range_start_val} to {st.session_state.range_end_val}")
+                                def stream_gen():
+                                    for chunk in update["content"]:
+                                        if chunk.choices[0].delta.content:
+                                            # Escape dollar signs to prevent Streamlit interpreting them as LaTeX math
+                                            yield chunk.choices[0].delta.content.replace("$", r"\$")
+                                
+                                full_response = st.write_stream(stream_gen())
+                                st.session_state.agent.save_assistant_message(full_response)
+                                st.session_state.last_auto_analyzed_range = current_range_key
+                                st.session_state.last_range_analysis_text = full_response
+                                st.session_state.ignore_plotly_clear = True # Added this line
+                                st.rerun() # Refresh to show in stable state
+                        elif update["type"] == "error":
+                            status.update(label="Analysis failed!", state="error")
+                            st.error(update["content"])
+            else:
+                with st.container(border=False):
+                    st.markdown(f"### 🤖 Analysis: {st.session_state.range_start_val} to {st.session_state.range_end_val}")
+                    st.markdown(st.session_state.get("last_range_analysis_text", ""))
+
         # Sentiment timeline
+
         st.markdown("**News Sentiment Over Time**")
         fig_sent = build_sentiment_timeline(filtered_news)
         st.plotly_chart(fig_sent, use_container_width=True, key="sent_chart")
@@ -761,7 +777,8 @@ elif active_tab == "🤖 AI Chat":
                         def stream_gen():
                             for chunk in update["content"]:
                                 if chunk.choices[0].delta.content:
-                                    yield chunk.choices[0].delta.content
+                                    # Escape dollar signs to prevent Streamlit interpreting them as LaTeX math
+                                    yield chunk.choices[0].delta.content.replace("$", r"\$")
                                     
                         full_response = st.write_stream(stream_gen())
                         st.session_state.chat_history.append(("AI Agent", full_response))
