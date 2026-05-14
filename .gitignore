@@ -1,2 +1,20 @@
 .env
+backend/.env
 .streamlit/secrets.toml
+
+# Local runtime / caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Backend local DB + vector store (never commit)
+backend/data/*.db
+backend/data/chroma_store/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+

@@ -1,89 +1,64 @@
-# 📈 Financial Agent: Event-Driven Stock Analysis
+# Financial Agent
 
-An intelligent financial analysis dashboard built with **Streamlit** that overlays global news events onto interactive stock price charts. Powered by a **Multi-Agent System** (utilizing Groq API and LLMs like Llama 3/4), this platform automates the work of a financial research team to help investors understand the *why* behind price movements.
+Event-driven stock analysis with a **React** dashboard and **FastAPI** backend. The UI loads OHLCV and news, overlays sentiment on charts, and runs a **multi-stage Groq LLM pipeline** (researcher → analyst → risk → synthesis) with tool calls (range analysis, similar periods, macro, options, SEC filings).
 
-## 🚀 Key Features
+## Repository layout
 
-- **🤖 Multi-Agent AI Orchestration**:
-  - **Researcher Agent**: Autonomously calls tools to fetch real-time SEC filings, macroeconomic indicators (FRED), options flow, and news data.
-  - **Analyst Agent**: Synthesizes the raw data into a structured investment thesis with bull and bear cases.
-  - **Risk Manager Agent**: Acts as a devil's advocate to challenge the thesis and identify blind spots before presenting the final report.
-- **📊 Event-Driven Charting**: Interactive Plotly candlestick charts natively embed news events as sentiment-coded dots along the price timeline.
-- **⚡ Automated Range Analysis**: Simply drag to highlight a date range on the chart, and the Multi-Agent team will automatically generate a comprehensive report explaining the exact drivers of that period's price action.
-- **🧠 Persistent Memory & Pattern Matching**: Utilizes SQLite for session memory and ChromaDB for semantic vector search, allowing the agent to find historical market periods with similar setups.
-- **📰 Smart News Feed**: A highly filterable news feed featuring zero-typing toggles for category, sentiment, and impact, plus deep keyword search.
+| Path | Role |
+|------|------|
+| `backend/` | FastAPI app (`main.py`), REST + SSE chat, SQLite + ChromaDB, `tools/market_data.py`, `agents/orchestrator.py`. |
+| `frontend/` | Vite + React + Tailwind; proxies `/api` to the backend in dev. |
+| `docs/HANDOFF.md` | Engineering handoff, verification checklist, known gaps. |
+| `requirements.txt` | Same dependency set as `backend/requirements.txt` (install from repo root). |
+| `pytest.ini` | Runs `backend/tests` with `pythonpath=backend`. |
 
-## 📖 Platform Usage Guide
+## Prerequisites
 
-1. **Initialization**: Enter your Groq API Key and select a target stock ticker (e.g., AAPL, NVDA, TSLA) in the left sidebar. Choose your desired historical viewing period and click **"Load Stock Data"**.
-2. **Interactive Charting**:
-   - **Hover** over dots on the candlestick chart to instantly read news headlines, sources, and AI-scored sentiment.
-   - **Click** a dot to pin that day's news strictly to the side panel.
-   - **Drag** a box over an area on the chart to select a date range. This will instantly trigger the AI team to analyze the movement and stream a **Range Analysis Report** directly to your screen.
-3. **Agentic Chat**: Navigate to the **"🤖 AI Chat"** tab to talk directly to your AI portfolio manager. Click on predefined **Quick AI Queries** (like *"Why is the stock moving today?"*), or type your own complex questions. The orchestrator will dynamically adjust its format whether you're asking for a general overview or a specific data point.
-4. **News Feed Deep-Dive**: Switch to the **"📰 News Feed"** tab to filter through hundreds of historical news events. Quickly toggle Categories (Earnings, Product, Macro) and Sentiments (Bullish/Bearish) to isolate market catalysts.
+- Python 3.11+ recommended  
+- Node 20+ for the frontend  
+- `GROQ_API_KEY` (required). Optional: `FRED_API_KEY`, `FINNHUB_API_KEY`, `NEWSAPI_API_KEY`, `ALPHAVANTAGE_API_KEY` — copy `backend/.env.example` to **`backend/.env`** (the API loads that file by path, not a root `.env`).
 
-## 💻 Installation & Setup
+## Quick start
 
-1. **Clone the repository**:
+**Backend** (from repo root or `backend/`):
 
-   ```bash
-   git clone https://github.com/debbbl/financial_agent.git
-   cd financial_agent
-   ```
+```bash
+python -m venv venv
+venv\Scripts\activate
+pip install -r backend/requirements.txt
+copy backend\.env.example backend\.env
+# Edit backend\.env — set GROQ_API_KEY at minimum
+cd backend
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
+```
 
-2. **Set up a Virtual Environment**:
+**Frontend** (separate terminal):
 
-   ```bash
-   python -m venv venv
-   # On macOS/Linux:
-   source venv/bin/activate  
-   # On Windows: 
-   venv\Scripts\activate
-   ```
+```bash
+cd frontend
+npm ci
+npm run dev
+```
 
-3. **Install Dependencies**:
+Open the URL Vite prints (usually `http://localhost:5173`). API requests go to `/api/v1/*` and are proxied to `http://localhost:8000`.
 
-   ```bash
-   pip install -r requirements.txt
-   ```
+## Tests
 
-4. **Configure Environment Variables**:
-   Create a `.env` file in the root directory and add your Groq API key:
+From repository root:
 
-   ```env
-   GROQ_API_KEY=your_groq_api_key_here
-   ```
+```bash
+pip install -r requirements.txt
+python -m pytest -q
+```
 
-5. **Run the Application**:
+## Docker
 
-   ```bash
-   streamlit run app.py
-   ```
+`backend/Dockerfile` and `frontend/Dockerfile` exist for container builds; wire them in compose if you deploy as a pair (API + static nginx).
 
-   *The dashboard will automatically open in your default web browser at `http://localhost:8501`.*
+## Claude for Financial Services (external)
 
-## 🛠️ Tech Stack & Data Sources
+Institutional-style skills and slash commands (e.g. comps, DCF workflows) live in the separate [anthropics/claude-for-financial-services](https://github.com/anthropics/claude-for-financial-services) ecosystem. This app does not bundle them; use that repo in Claude Code when you want those workflows next to this dashboard.
 
-### Core Frameworks & AI
+## Disclaimer
 
-- **Frontend**: [Streamlit](https://streamlit.io/)
-- **AI Engine**: [Groq API](https://groq.com/) for ultra-low latency LLM inference
-- **NLP Sentiment**: [ProsusAI/finbert](https://huggingface.co/ProsusAI/finbert) (HuggingFace Transformers) for deep financial text classification
-- **Database**: SQLite (Relational State) & ChromaDB (Vector Embeddings)
-- **Visualization**: [Plotly](https://plotly.com/)
-
-### Agent Tools & Market Data Providers
-
-- **Price Action & Options Flow**: [yfinance](https://github.com/ranaroussi/yfinance) (Historical OHLCV prices, volume, implied volatility, Put/Call ratios)
-- **Macroeconomics**: [FRED API](https://fred.stlouisfed.org/) (Federal Reserve Economic Data for interest rates, CPI, Unemployment, Yield Curve)
-- **Regulatory Filings**: [SEC EDGAR](https://www.sec.gov/edgar.shtml) Public API (Real-time extraction of 8-K, 10-Q, and 10-K corporate filings)
-
-### News Aggregation Pipeline
-
-The Researcher agent dynamically gathers real-time articles using a 4-tier robust fallback architecture:
-
-1. **Finnhub** (Primary, high-quality company-specific news)
-2. **Alpha Vantage** (Finance-focused feed with built-in topics)
-3. **NewsAPI** (Broad coverage across major global publishers)
-4. **DuckDuckGo** (Scraper-based fallback feed)
+Outputs are analytical drafts, not investment advice.

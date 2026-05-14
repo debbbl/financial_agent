@@ -1,0 +1,50 @@
+/**
+ * Design tokens consumed by globals.css (@theme) and legacy component classes.
+ */
+:root {
+  --font-display-stack: "Plus Jakarta Sans", system-ui, sans-serif;
+  --font-body-stack: "DM Sans", system-ui, sans-serif;
+  --font-mono-stack: "JetBrains Mono", ui-monospace, monospace;
+
+  --bg-primary: #0a0b0f;
+  --bg-secondary: #11131a;
+  --bg-tertiary: #181b24;
+  --bg-glass: rgb(17 19 26 / 0.72);
+
+  --border-subtle: rgb(255 255 255 / 0.06);
+  --border-default: rgb(255 255 255 / 0.12);
+
+  --accent-blue: #38bdf8;
+  --accent-blue-glow: rgb(56 189 248 / 0.35);
+  --accent-green: #34d399;
+  --accent-red: #f87171;
+  --accent-amber: #fbbf24;
+
+  --text-primary: #f4f4f5;
+  --text-secondary: #c4c4cc;
+  --text-muted: #8b8b9a;
+
+  /* Legacy welcome / search palette */
+  --text-1: #f4f4f5;
+  --text-3: #a1a1aa;
+  --text-4: #71717a;
+  --surface-2: #1a1d27;
+  --primary: #38bdf8;
+  --primary-light: rgb(56 189 248 / 0.12);
+
+  --text-11: 0.6875rem;
+  --text-12: 0.75rem;
+  --text-13: 0.8125rem;
+  --text-14: 0.875rem;
+  --text-16: 1rem;
+
+  --space-4: 1rem;
+
+  --duration-fast: 180ms;
+  --ease-out-tab: cubic-bezier(0.25, 0.46, 0.45, 0.94);
+  --ease-out-soft: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-smooth: cubic-bezier(0.4, 0, 0.2, 1);
+
+  --token-shadow-card: 0 8px 28px rgb(0 0 0 / 0.35);
+  --token-shadow-hover: 0 12px 40px rgb(0 0 0 / 0.45);
+}

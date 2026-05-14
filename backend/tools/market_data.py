@@ -1,0 +1,751 @@
+"""
+tools/market_data.py  — PRODUCTION VERSION
+Fetches real news from 4 sources with fallback chain:
+  1. Finnhub        (company-specific, best quality)
+  2. Alpha Vantage  (finance-focused, includes built-in sentiment)
+  3. NewsAPI        (broad coverage, good volume)
+  4. DuckDuckGo     (free, no API key, last resort)
+
+Only one source needs to work for the app to function.
+Set available API keys in .env — unused sources are skipped gracefully.
+"""
+
+import os
+import time
+import json
+import hashlib
+import requests
+import yfinance as yf
+import pandas as pd
+from datetime import datetime, timedelta
+from dataclasses import dataclass
+from typing import Optional
+from pathlib import Path
+from urllib.parse import quote_plus
+from dotenv import load_dotenv
+from transformers import pipeline
+from fredapi import Fred
+
+# Resolve .env: load backend first, then repo-root with override so keys in
+# `financial_agent/.env` win over `backend/.env` (uvicorn cwd is often `backend/`).
+_TOOLS_DIR = Path(__file__).resolve().parent
+_BACKEND_ROOT = _TOOLS_DIR.parent
+_REPO_ROOT = _BACKEND_ROOT.parent
+load_dotenv(_BACKEND_ROOT / ".env", override=False)
+load_dotenv(_REPO_ROOT / ".env", override=True)
+
+
+def _secret_or_env(name: str, default: str = "") -> str:
+    """Read from environment only — FastAPI uses .env via python-dotenv."""
+    return (os.getenv(name) or "").strip() or default
+
+
+_NEWS_CACHE: dict = {}
+CACHE_TTL_SECONDS = 3600
+
+# Chart API latency: cap articles before dedupe/FinBERT.
+_MAX_NEWS_ARTICLES_PER_REQUEST = 52
+# FinBERT is the dominant CPU cost — score the most recent N; keyword fallback for the rest.
+_FINBERT_SENTIMENT_CAP = 30
+
+
+def _spread_news_across_dates(rows: list, max_items: int) -> list:
+    """Round-robin across calendar dates so headlines cover the OHLC range, not only the newest days."""
+    from collections import defaultdict
+
+    by_day: dict[str, list] = defaultdict(list)
+    for r in rows:
+        d = (r.get("date") or "").strip()
+        if not d:
+            continue
+        by_day[d].append(r)
+
+    def source_rank(rec: dict) -> int:
+        src = (rec.get("source") or "").lower()
+        if "finnhub" in src:
+            return 0
+        if "alpha" in src or "vantage" in src:
+            return 1
+        if "newsapi" in src:
+            return 2
+        return 3
+
+    for d in by_day:
+        by_day[d].sort(key=source_rank)
+
+    days = sorted(by_day.keys())
+    if not days:
+        return []
+
+    out: list = []
+    idx = {d: 0 for d in days}
+    while len(out) < max_items:
+        progressed = False
+        for d in days:
+            if len(out) >= max_items:
+                break
+            pos = idx[d]
+            lst = by_day[d]
+            if pos < len(lst):
+                out.append(lst[pos])
+                idx[d] = pos + 1
+                progressed = True
+        if not progressed:
+            break
+    return out
+
+
+@dataclass
+class NewsEvent:
+    date: str
+    title: str
+    source: str
+    category: str
+    sentiment: str
+    sentiment_score: float
+    impact: str
+    url: str = ""
+    summary: str = ""
+    image_url: str = ""
+
+
+@dataclass
+class StockData:
+    ticker: str
+    prices: pd.DataFrame
+    news: list
+    current_price: float
+    price_change_pct: float
+
+
+CATEGORY_KEYWORDS = {
+    "earnings": ["earnings","revenue","profit","loss","eps","quarterly","annual","guidance","forecast","beat","miss","dividend","margin","fiscal","results","income","ebitda"],
+    "product":  ["launch","product","release","feature","update","iphone","ipad","chip","gpu","software","hardware","app","platform","cloud","innovation","patent","technology","device"],
+    "management": ["ceo","cfo","cto","chief","executive","president","director","board","resign","appoint","hire","fired","leadership","insider","buyback","acquisition","merger","layoff"],
+    "policy":   ["regulation","antitrust","sec","ftc","doj","government","ban","sanction","tariff","trade","export","china","eu","federal","congress","tax","probe","lawsuit","fine"],
+    "competition": ["competitor","competition","rival","market share","beats","surpasses","overtakes","amazon","google","microsoft","apple","meta","nvidia","amd","intel","samsung","byd","openai"],
+    "market":   ["market","stock","rally","selloff","surge","drop","analyst","upgrade","downgrade","target","rating","investor","fund","etf","index","fed","interest rate","inflation","economy"],
+}
+
+BULLISH_KEYWORDS = ["beat","surge","rally","record","growth","profit","strong","bullish","upgrade","buy","outperform","positive","gain","rises","soars","jumps","exceeds","breakthrough","wins","approved"]
+BEARISH_KEYWORDS = ["miss","drop","fall","decline","loss","weak","bearish","downgrade","sell","underperform","negative","cut","slumps","plunges","disappoints","concern","risk","probe","lawsuit","ban","layoff","warning"]
+
+
+def classify_category(text: str) -> str:
+    t = (text or "").lower()
+    scores = {cat: sum(1 for kw in kws if kw in t) for cat, kws in CATEGORY_KEYWORDS.items()}
+    best = max(scores, key=scores.get)
+    return best if scores[best] > 0 else "market"
+
+
+def _keyword_sentiment_fallback(text: str) -> tuple:
+    t = (text or "").lower()
+    bull = sum(1 for kw in BULLISH_KEYWORDS if kw in t)
+    bear = sum(1 for kw in BEARISH_KEYWORDS if kw in t)
+    if bull == 0 and bear == 0:
+        return "neutral", 0.0
+    total = bull + bear
+    raw = (bull - bear) / total
+    scaled = raw * min(1.0, total / 3)
+    label = "bullish" if scaled > 0.15 else "bearish" if scaled < -0.15 else "neutral"
+    return label, round(max(-1.0, min(1.0, scaled)), 3)
+
+
+# Load once at module level — avoids reloading on every call
+_finbert_pipeline = None
+
+def get_finbert():
+    global _finbert_pipeline
+    if _finbert_pipeline is None:
+        import os
+        # Simple check: the model usually lives in ~/.cache/huggingface/hub/models--ProsusAI--finbert
+        # This isn't perfect but allows us to log "Downloading" vs "Loaded from cache"
+        cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "hub")
+        model_cache_path = os.path.join(cache_dir, "models--ProsusAI--finbert")
+        
+        if os.path.exists(model_cache_path):
+            print("[FinBERT] Model loaded from cache")
+        else:
+            print("[FinBERT] Downloading model (~440MB)...")
+            
+        _finbert_pipeline = pipeline(
+            "text-classification",
+            model="ProsusAI/finbert",
+            tokenizer="ProsusAI/finbert",
+            top_k=None,       # return all 3 label scores
+            truncation=True,
+            max_length=512,
+        )
+    return _finbert_pipeline
+
+
+def score_sentiment(text: str) -> tuple[str, float]:
+    """
+    FinBERT-based sentiment scorer.
+    Returns (sentiment_label, score) where score is in [-1.0, +1.0].
+    Falls back to keyword scoring if model unavailable.
+    """
+    if not text or len(text.strip()) < 5:
+        return "neutral", 0.0
+    try:
+        finbert = get_finbert()
+        # Truncate to 512 for BERT model limits
+        results = finbert(text[:512])[0]
+        scores = {r["label"]: r["score"] for r in results}
+        positive = scores.get("positive", 0.0)
+        negative = scores.get("negative", 0.0)
+        neutral  = scores.get("neutral",  0.0)
+        # Composite score: positive pulls toward +1, negative toward -1
+        score = positive - negative
+        if positive > negative and positive > neutral:
+            label = "bullish"
+        elif negative > positive and negative > neutral:
+            label = "bearish"
+        else:
+            label = "neutral"
+        return label, round(max(-1.0, min(1.0, score)), 3)
+    except Exception as e:
+        return _keyword_sentiment_fallback(text)
+
+
+def score_sentiment_batch(texts: list[str]) -> list[tuple[str, float]]:
+    """
+    Batched FinBERT sentiment scoring for massive speedup.
+    """
+    if not texts: return []
+    try:
+        finbert = get_finbert()
+        # Larger batches = fewer transformer round-trips (same VRAM ceiling).
+        batch_size = 24
+        all_results = []
+        for i in range(0, len(texts), batch_size):
+            batch = [t[:512] for t in texts[i:i+batch_size]]
+            all_results.extend(finbert(batch))
+        
+        final = []
+        for results in all_results:
+            # results is a list of 3 dicts [pos, neg, neut] or similar
+            scores = {r["label"]: r["score"] for r in results}
+            pos, neg, neut = scores.get("positive", 0.0), scores.get("negative", 0.0), scores.get("neutral", 0.0)
+            score = pos - neg
+            label = "bullish" if pos > neg and pos > neut else "bearish" if neg > pos and neg > neut else "neutral"
+            final.append((label, round(max(-1.0, min(1.0, score)), 3)))
+        return final
+    except Exception as e:
+        print(f"[FinBERT] Batch fallback: {e}")
+        return [score_sentiment(t) for t in texts]
+
+
+
+def derive_impact(score: float, source: str) -> str:
+    credible = any(s in source.lower() for s in ["reuters","bloomberg","wsj","ft","cnbc","sec","finnhub"])
+    a = abs(score)
+    if a >= 0.6 or (a >= 0.4 and credible): return "high"
+    if a >= 0.25: return "medium"
+    return "low"
+
+
+def _cache_key(ticker: str, days: int) -> str:
+    return hashlib.md5(f"{ticker}_{days}_{datetime.now().strftime('%Y-%m-%d')}".encode()).hexdigest()
+
+
+def _is_cached(key: str) -> bool:
+    if key not in _NEWS_CACHE: return False
+    ts, _ = _NEWS_CACHE[key]
+    return (time.time() - ts) < CACHE_TTL_SECONDS
+
+
+def _normalise(raw_events: list) -> list:
+    events, seen = [], set()
+    to_score = []
+    
+    # Pre-filter duplicates and collect texts for batching
+    unique_raw = []
+    for item in raw_events:
+        title = (item.get("title") or "").strip()
+        if not title or title in seen: continue
+        seen.add(title)
+        full = title + " " + (item.get("summary") or "")
+        unique_raw.append((item, full))
+        # Only score if AV didn't already provide it
+        if "sentiment" not in item:
+            to_score.append(full)
+            
+    # Batch sentiment scoring (FinBERT cap — remainder uses fast keyword fallback)
+    if len(to_score) > _FINBERT_SENTIMENT_CAP:
+        scored_results = score_sentiment_batch(to_score[:_FINBERT_SENTIMENT_CAP]) + [
+            _keyword_sentiment_fallback(t) for t in to_score[_FINBERT_SENTIMENT_CAP:]
+        ]
+    else:
+        scored_results = score_sentiment_batch(to_score)
+    score_idx = 0
+    
+    for item, full in unique_raw:
+        if "sentiment" in item and "sentiment_score" in item:
+            sent_label = item["sentiment"]
+            sent_score = item["sentiment_score"]
+        else:
+            sent_label, sent_score = scored_results[score_idx]
+            score_idx += 1
+            
+        category = item.get("category") or classify_category(full)
+        img = (
+            (item.get("image_url") or item.get("urlToImage") or item.get("image") or item.get("banner_image") or "")
+            .strip()
+        )
+        events.append(
+            NewsEvent(
+                date=item["date"],
+                title=item["title"],
+                source=item.get("source", "Unknown"),
+                category=category,
+                sentiment=sent_label,
+                sentiment_score=sent_score,
+                impact=item.get("impact") or derive_impact(sent_score, item.get("source", "")),
+                url=item.get("url", ""),
+                summary=item.get("summary", ""),
+                image_url=img,
+            )
+        )
+    return events
+
+
+# ── Source 1: Finnhub ─────────────────────────────────────────────────────────
+def fetch_from_finnhub(ticker: str, start_date: str, end_date: str) -> list:
+    key = _secret_or_env("FINNHUB_API_KEY")
+    if not key:
+        print("[Finnhub] Skipped (FINNHUB_API_KEY empty or unset)")
+        return []
+    try:
+        resp = requests.get("https://finnhub.io/api/v1/company-news",
+            params={"symbol":ticker,"from":start_date,"to":end_date,"token":key}, timeout=10)
+        resp.raise_for_status()
+        articles = resp.json()
+        if not isinstance(articles, list): return []
+        results = [{"date": datetime.fromtimestamp(a.get("datetime",0)).strftime("%Y-%m-%d"),
+                    "title": a.get("headline",""), "source": a.get("source","Finnhub"),
+                    "summary": a.get("summary",""), "url": a.get("url",""),
+                    "image_url": (a.get("image") or "")} for a in articles]
+        print(f"[Finnhub] {len(results)} articles")
+        return results
+    except Exception as e:
+        print(f"[Finnhub] Error: {e}"); return []
+
+
+# ── Source 2: Alpha Vantage ───────────────────────────────────────────────────
+AV_SENT_MAP = {
+    "Bearish":("bearish",-0.65),"Somewhat-Bearish":("bearish",-0.35),
+    "Neutral":("neutral",0.0),"Somewhat-Bullish":("bullish",0.35),"Bullish":("bullish",0.70),
+}
+AV_TOPIC_MAP = {"earnings":"earnings","financial_markets":"market","mergers_and_acquisitions":"management",
+                "ipo":"management","technology":"product"}
+
+def fetch_from_alphavantage(ticker: str, days: int = 90) -> list:
+    key = _secret_or_env("ALPHAVANTAGE_API_KEY")
+    if not key:
+        print("[AlphaVantage] Skipped (ALPHAVANTAGE_API_KEY empty or unset)")
+        return []
+    try:
+        time_from = (datetime.now() - timedelta(days=days)).strftime("%Y%m%dT0000")
+        resp = requests.get("https://www.alphavantage.co/query",
+            params={"function":"NEWS_SENTIMENT","tickers":ticker,"time_from":time_from,
+                    "limit":200,"apikey":key}, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        if "feed" not in data:
+            hint = data.get("Note") or data.get("Information") or data.get("Error Message")
+            if hint:
+                print(f"[AlphaVantage] No feed: {hint}")
+            return []
+        results = []
+        for a in data["feed"]:
+            try: date_str = datetime.strptime(a.get("time_published","")[:8],"%Y%m%d").strftime("%Y-%m-%d")
+            except: continue
+            ts = next((t for t in a.get("ticker_sentiment",[]) if t.get("ticker")==ticker), None)
+            if ts:
+                label = ts.get("ticker_sentiment_label","Neutral")
+                sl, ss = AV_SENT_MAP.get(label, ("neutral",0.0))
+                ss = float(ts.get("ticker_sentiment_score", ss))
+            else:
+                sl, ss = score_sentiment(a.get("title","")+a.get("summary",""))
+            topics = [t.get("topic","") for t in a.get("topics",[])]
+            cat = next((AV_TOPIC_MAP[t] for t in topics if t in AV_TOPIC_MAP), "market")
+            results.append({"date":date_str,"title":a.get("title",""),
+                "source":a.get("source","Alpha Vantage"),"summary":a.get("summary",""),
+                "url":a.get("url",""),"category":cat,"sentiment":sl,
+                "sentiment_score":round(max(-1.0,min(1.0,ss)),3),
+                "image_url": (a.get("banner_image") or a.get("image") or "")})
+        print(f"[AlphaVantage] {len(results)} articles")
+        return results
+    except Exception as e:
+        print(f"[AlphaVantage] Error: {e}"); return []
+
+
+# ── Source 3: NewsAPI ─────────────────────────────────────────────────────────
+def fetch_from_newsapi(ticker: str, company_name: str, days: int = 30) -> list:
+    key = _secret_or_env("NEWSAPI_API_KEY")
+    if not key:
+        print("[NewsAPI] Skipped (NEWSAPI_API_KEY empty or unset)")
+        return []
+    try:
+        from_date = (datetime.now() - timedelta(days=min(days,29))).strftime("%Y-%m-%d")
+        # Do not pass `sources` by default — free-tier keys often get zero hits when restricted
+        # to premium outlets, and some accounts return HTTP 426 until `sources` is removed.
+        params = {
+            "q": (
+                f'"{ticker}" OR "{company_name}" OR '
+                f'"{company_name}" stock OR "{ticker}" stock OR "{company_name}" earnings'
+            ),
+            "from": from_date,
+            "sortBy": "publishedAt",
+            "language": "en",
+            "pageSize": 100,
+            "apiKey": key,
+        }
+        resp = requests.get("https://newsapi.org/v2/everything", params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("status") != "ok": return []
+        results = []
+        required_words = {ticker.lower(), company_name.lower(), "stock", "shares", "earnings", "revenue", "market", "investor", "trading", "nyse", "nasdaq"}
+        
+        for a in data.get("articles",[]):
+            try: date_str = datetime.strptime(a.get("publishedAt","")[:10],"%Y-%m-%d").strftime("%Y-%m-%d")
+            except: continue
+            title = a.get("title") or ""
+            if len(title) < 10 or "[Removed]" in title: continue
+            
+            title_lower = title.lower()
+            if not any(w in title_lower for w in required_words):
+                continue
+                
+            results.append({"date":date_str,"title":title,
+                "source":a.get("source",{}).get("name","NewsAPI"),
+                "summary":a.get("description",""),"url":a.get("url",""),
+                "image_url": (a.get("urlToImage") or "")})
+        print(f"[NewsAPI] {len(results)} articles")
+        return results
+    except Exception as e:
+        print(f"[NewsAPI] Error: {e}"); return []
+
+
+# ── Source 4: DuckDuckGo ──────────────────────────────────────────────────────
+def fetch_from_duckduckgo(ticker: str, company_name: str, days: int = 30) -> list:
+    try:
+        query = quote_plus(f"{ticker} {company_name} stock news")
+        resp = requests.get(f"https://duckduckgo.com/news.js?q={query}&o=json&l=us-en&s=0&df=m",
+            headers={"User-Agent":"Mozilla/5.0 Chrome/120.0.0.0","Accept":"application/json"}, timeout=10)
+        resp.raise_for_status()
+        text = resp.text.strip()
+        if text.startswith("nrj("): text = text[4:-1]
+        articles = json.loads(text).get("results",[])
+        cutoff = datetime.now() - timedelta(days=days)
+        results = []
+        for a in articles:
+            try:
+                dt = datetime.fromtimestamp(a.get("date",0))
+                if dt < cutoff: continue
+                title = a.get("title","").strip()
+                if title:
+                    results.append({"date":dt.strftime("%Y-%m-%d"),"title":title,
+                        "source":a.get("source","DuckDuckGo"),"summary":a.get("excerpt",""),
+                        "url":a.get("url",""), "image_url": (a.get("image") or "")})
+            except: continue
+        print(f"[DuckDuckGo] {len(results)} articles")
+        return results
+    except Exception as e:
+        print(f"[DuckDuckGo] Error: {e}"); return []
+
+
+# ── Company name lookup ───────────────────────────────────────────────────────
+TICKER_NAMES = {
+    "AAPL":"Apple","NVDA":"NVIDIA","TSLA":"Tesla","MSFT":"Microsoft",
+    "GOOGL":"Google Alphabet","AMZN":"Amazon","META":"Meta Facebook",
+    "AMD":"Advanced Micro Devices","INTC":"Intel","NFLX":"Netflix",
+    "JPM":"JPMorgan Chase","V":"Visa","WMT":"Walmart","BABA":"Alibaba",
+}
+
+def get_company_name(ticker: str) -> str:
+    if ticker in TICKER_NAMES: return TICKER_NAMES[ticker]
+    try:
+        info = yf.Ticker(ticker).info
+        return info.get("longName") or info.get("shortName") or ticker
+    except: return ticker
+
+
+# ── Main orchestrator ─────────────────────────────────────────────────────────
+def fetch_news_all_sources(ticker: str, start_date: str, end_date: str, days: int = 90) -> list:
+    key = _cache_key(ticker, days)
+    if _is_cached(key):
+        print(f"[Cache] Returning cached news for {ticker}")
+        return _NEWS_CACHE[key][1]
+
+    company = get_company_name(ticker)
+    print(f"\n[Multi-Source] Fetching news for {ticker} ({company})...")
+    
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        f_finnhub = executor.submit(fetch_from_finnhub, ticker, start_date, end_date)
+        f_av      = executor.submit(fetch_from_alphavantage, ticker, days)
+        f_newsapi = executor.submit(fetch_from_newsapi, ticker, company, min(days, 29))
+        
+        all_raw = f_finnhub.result() + f_av.result() + f_newsapi.result()
+
+    if len(all_raw) < 5:
+        all_raw.extend(fetch_from_duckduckgo(ticker, company, days))
+    else:
+        print(f"[DuckDuckGo] Skipped - already have {len(all_raw)} articles")
+
+    all_raw = [r for r in all_raw if start_date <= r.get("date", "9999") <= end_date]
+    all_raw = _spread_news_across_dates(all_raw, _MAX_NEWS_ARTICLES_PER_REQUEST)
+    events = _normalise(all_raw)
+    events.sort(key=lambda e: e.date)
+
+    print(f"[Summary] {len(events)} unique events for {ticker} ({start_date} to {end_date})\n")
+    _NEWS_CACHE[key] = (time.time(), events)
+    return events
+
+
+# ── Public API ────────────────────────────────────────────────────────────────
+def fetch_stock_data(
+    ticker: str,
+    period: str = "3mo",
+    start: str = None,
+    end: str = None,
+    interval: str | None = None,
+    *,
+    include_news: bool = True,
+) -> StockData:
+    stock = yf.Ticker(ticker)
+    if start and end:
+        hist = stock.history(start=start, end=end, interval=interval or "1d")
+    elif period == "14d":
+        end_dt = pd.Timestamp.now(tz=None).normalize()
+        start_dt = end_dt - pd.Timedelta(days=14)
+        hist = stock.history(
+            start=start_dt.strftime("%Y-%m-%d"),
+            end=(end_dt + pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
+            interval=interval or "1h",
+        )
+    elif interval:
+        hist = stock.history(period=period, interval=interval)
+    else:
+        hist = stock.history(period=period)
+    if hist.empty:
+        raise ValueError(f"No price data found for ticker '{ticker}'")
+
+    hist = hist[["Open","High","Low","Close","Volume"]].copy()
+    hist.index = pd.to_datetime(hist.index).tz_localize(None).normalize()
+    # Ensure index is unique to prevent duplicate dates on x-axis
+    hist = hist[~hist.index.duplicated(keep="last")]
+
+    current_price = float(hist["Close"].iloc[-1])
+    prev_close = float(hist["Close"].iloc[-2]) if len(hist) > 1 else current_price
+    price_change_pct = ((current_price - prev_close) / prev_close) * 100
+
+    start_date = hist.index[0].strftime("%Y-%m-%d")
+    end_date = hist.index[-1].strftime("%Y-%m-%d")
+    days = (hist.index[-1] - hist.index[0]).days + 1
+
+    news: list = []
+    if include_news:
+        news = fetch_news_all_sources(ticker, start_date, end_date, days)
+        if not news:
+            print(
+                f"\n[WARN] No news for {ticker}. "
+                "Add FINNHUB_API_KEY, ALPHAVANTAGE_API_KEY, and/or NEWSAPI_API_KEY to "
+                "`backend/.env` or the repo-root `.env` (see logs for [Finnhub]/[AlphaVantage]/[NewsAPI]). "
+                "DuckDuckGo often returns 403 for server-side requests; do not rely on it alone. "
+                "In-memory news cache is ~1h - restart the API to retry after fixing keys.\n"
+            )
+
+    return StockData(ticker=ticker, prices=hist, news=news,
+                     current_price=current_price, price_change_pct=price_change_pct)
+
+
+def compute_overall_sentiment(news: list) -> float:
+    if not news: return 0.0
+    weights = {"high":3,"medium":2,"low":1}
+    total_w = sum(weights[n.impact] for n in news)
+    weighted_sum = sum(n.sentiment_score * weights[n.impact] for n in news)
+    return round(weighted_sum / total_w, 3) if total_w else 0.0
+
+
+def filter_news(news: list, categories: Optional[list] = None, sentiments: Optional[list] = None) -> list:
+    result = news
+    if categories is not None: result = [n for n in result if n.category in categories]
+    if sentiments is not None: result = [n for n in result if n.sentiment in sentiments]
+    return result
+
+
+def get_range_news(news: list, start_date: str, end_date: str) -> list:
+    return [n for n in news if start_date <= n.date <= end_date]
+
+
+# ── New Macro & Options Tools ────────────────────────────────────────────────
+
+FRED_INDICATORS = {
+    "DFF":    "Federal Funds Rate",
+    "CPIAUCSL": "CPI Inflation",
+    "UNRATE": "Unemployment Rate",
+    "T10Y2Y": "Yield Curve (10Y-2Y)",
+    "VIXCLS": "VIX Volatility Index",
+    "GDP":    "GDP Growth Rate",
+}
+
+def fetch_macro_context(start_date: str, end_date: str) -> dict:
+    """
+    Fetch key macro indicators from FRED for the given date range.
+    Returns latest value + 30-day change for each indicator.
+    """
+    fred_key = _secret_or_env("FRED_API_KEY")
+    if not fred_key or "your_fred_api_key" in fred_key:
+        return {"error": "FRED_API_KEY not set or invalid (set in backend/.env)"}
+    try:
+        fred = Fred(api_key=fred_key)
+        results = {}
+        for series_id, label in FRED_INDICATORS.items():
+            try:
+                series = fred.get_series(
+                    series_id,
+                    observation_start=start_date,
+                    observation_end=end_date
+                )
+                if not series.empty:
+                    latest   = round(float(series.iloc[-1]), 3)
+                    # Use previous observation for change if available
+                    previous = round(float(series.iloc[-2]), 3) if len(series) > 1 else latest
+                    results[series_id] = {
+                        "label":   label,
+                        "latest":  latest,
+                        "change":  round(latest - previous, 3),
+                        "trend":   "rising" if latest > previous else "falling",
+                    }
+            except Exception:
+                continue
+        print(f"[FRED] Fetched {len(results)} macro indicators")
+        return results
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def fetch_options_data(ticker: str) -> dict:
+    """
+    Fetch options chain data from yfinance.
+    Returns put/call ratio, implied volatility, and nearest expiry summary.
+    """
+    try:
+        stock = yf.Ticker(ticker)
+        expirations = stock.options
+        if not expirations:
+            return {"error": f"No options data available for {ticker}"}
+
+        # Use nearest expiry date
+        nearest = expirations[0]
+        chain   = stock.option_chain(nearest)
+        calls   = chain.calls
+        puts    = chain.puts
+
+        # Filter out rows with NaN in volume/iv before calculations
+        calls = calls.dropna(subset=["volume", "impliedVolatility"])
+        puts  = puts.dropna(subset=["volume", "impliedVolatility"])
+
+        call_volume = int(calls["volume"].sum())
+        put_volume  = int(puts["volume"].sum())
+        pcr = round(put_volume / call_volume, 3) if call_volume > 0 else None
+
+        avg_call_iv = round(float(calls["impliedVolatility"].mean()) * 100, 2) if not calls.empty else 0.0
+        avg_put_iv  = round(float(puts["impliedVolatility"].mean()) * 100, 2) if not puts.empty else 0.0
+
+        # Identify unusual activity — top 3 strikes by volume
+        top_calls = calls.nlargest(3, "volume")[["strike","volume","impliedVolatility"]].to_dict("records")
+        top_puts  = puts.nlargest(3,  "volume")[["strike","volume","impliedVolatility"]].to_dict("records")
+
+        sentiment = "bearish" if pcr and pcr > 1.2 else "bullish" if pcr and pcr < 0.8 else "neutral"
+
+        print(f"[Options] Fetched chain for {ticker} (nearest expiry: {nearest})")
+        return {
+            "ticker": ticker,
+            "nearest_expiry": nearest,
+            "call_volume": call_volume,
+            "put_volume":  put_volume,
+            "put_call_ratio": pcr,
+            "options_sentiment": sentiment,
+            "avg_call_iv_pct": avg_call_iv,
+            "avg_put_iv_pct":  avg_put_iv,
+            "top_call_strikes": top_calls,
+            "top_put_strikes":  top_puts,
+            "interpretation": (
+                f"PCR of {pcr} suggests {'bearish hedging' if pcr and pcr > 1 else 'bullish positioning'}. "
+                f"Average IV of {avg_call_iv}% on calls indicates "
+                f"{'elevated' if avg_call_iv > 30 else 'normal'} market uncertainty."
+            )
+        }
+    except Exception as e:
+        print(f"[Options] Error: {e}")
+        return {"error": str(e)}
+
+
+def fetch_sec_filings(ticker: str, filing_types: list = ["8-K", "10-Q", "10-K"]) -> dict:
+    """
+    Fetch recent SEC filings from EDGAR for a ticker.
+    No API key required — public endpoint.
+    Returns latest filings with date, type, and description.
+    """
+    try:
+        # Step 1: Get CIK number from ticker
+        # We'll use the SEC's CIK lookup atom feed
+        headers = {"User-Agent": "FinancialAgent research@example.com"}
+        cik_url  = f"https://www.sec.gov/cgi-bin/browse-edgar?company=&CIK={ticker}&type=10-K&dateb=&owner=include&count=1&search_text=&action=getcompany&output=atom"
+        resp     = requests.get(cik_url, headers=headers, timeout=20)
+        
+        import re
+        cik_match = re.search(r"CIK=(\d+)", resp.text)
+        if not cik_match:
+            return {"error": f"Could not find CIK for {ticker}"}
+        cik = cik_match.group(1).zfill(10)
+
+        # Step 2: Fetch recent filings from submissions endpoint
+        sub_url  = f"https://data.sec.gov/submissions/CIK{cik}.json"
+        sub_resp = requests.get(sub_url, headers=headers, timeout=20)
+        sub_resp.raise_for_status()
+        data     = sub_resp.json()
+
+        recent   = data.get("filings", {}).get("recent", {})
+        forms    = recent.get("form", [])
+        dates    = recent.get("filingDate", [])
+        accnos   = recent.get("accessionNumber", [])
+        descriptions = recent.get("primaryDocument", [])
+
+        filings = []
+        for form, date, accno, doc in zip(forms, dates, accnos, descriptions):
+            if form in filing_types:
+                filings.append({
+                    "type": form,
+                    "date": date,
+                    "description": _filing_description(form),
+                    "url": f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik}&type={form}&dateb=&owner=include&count=5",
+                })
+            if len(filings) >= 5:
+                break
+
+        print(f"[EDGAR] Found {len(filings)} filings for {ticker}")
+        return {
+            "ticker": ticker,
+            "company": data.get("name", ticker),
+            "recent_filings": filings,
+            "note": "Source: SEC EDGAR public API — no key required"
+        }
+    except Exception as e:
+        print(f"[EDGAR] Error: {e}")
+        return {"error": str(e)}
+
+def _filing_description(form: str) -> str:
+    return {
+        "8-K":  "Material event disclosure — earnings, M&A, leadership change",
+        "10-Q": "Quarterly financial report",
+        "10-K": "Annual financial report",
+        "4":    "Insider trading disclosure",
+        "SC 13G":"Large shareholder position filing",
+    }.get(form, "SEC filing")
+
