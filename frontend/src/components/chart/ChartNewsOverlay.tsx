@@ -18,6 +18,8 @@ type Props = {
   chartRef: MutableRefObject<IChartApi | null>
   candleSeriesRef: MutableRefObject<ISeriesApi<'Candlestick'> | null>
   chartContainerRef: MutableRefObject<HTMLDivElement | null>
+  /** Chart + tooltip wrapper — mouseleave uses this so moving onto the tooltip does not dismiss it */
+  interactionRootRef?: MutableRefObject<HTMLDivElement | null>
   chartReady: boolean
   news: MarketNewsEvent[]
   ohlcv: OhlcvBar[]
@@ -100,6 +102,54 @@ function collectNewsWindow(iso: string, byDay: Map<string, MarketNewsEvent[]>): 
   return out
 }
 
+function dedupeNewsIds(items: MarketNewsEvent[]): MarketNewsEvent[] {
+  const seen = new Set<string>()
+  const out: MarketNewsEvent[] = []
+  for (const n of items) {
+    const id = `${n.date}|${n.title}|${n.url ?? ''}`
+    if (seen.has(id)) continue
+    seen.add(id)
+    out.push(n)
+  }
+  return out
+}
+
+/** Calendar distance in days between two YYYY-MM-DD strings. */
+function calendarDayDistance(aIso: string, bIso: string): number {
+  const t0 = Date.parse(`${aIso.slice(0, 10)}T12:00:00Z`)
+  const t1 = Date.parse(`${bIso.slice(0, 10)}T12:00:00Z`)
+  if (Number.isNaN(t0) || Number.isNaN(t1)) return 99999
+  return Math.abs(Math.round((t0 - t1) / 86400000))
+}
+
+/**
+ * Prefer articles published on hovered day ±1. If APIs only returned recent dates
+ * (e.g. last 48h), that window is empty for older bars — fall back to chart-range
+ * headlines sorted by proximity to the hovered bar, then move-scoring picks one.
+ */
+function newsCandidatePool(
+  iso: string,
+  byDay: Map<string, MarketNewsEvent[]>,
+  allNews: MarketNewsEvent[],
+  ohlcv: OhlcvBar[]
+): MarketNewsEvent[] {
+  const windowed = collectNewsWindow(iso, byDay)
+  if (windowed.length > 0) return windowed
+
+  if (allNews.length === 0) return []
+
+  const minD = ohlcv[0]?.date
+  const maxD = ohlcv[ohlcv.length - 1]?.date
+  let base =
+    minD && maxD ? allNews.filter((n) => n.date >= minD && n.date <= maxD) : allNews
+  if (base.length === 0) base = allNews
+
+  const sorted = [...base].sort(
+    (a, b) => calendarDayDistance(a.date, iso) - calendarDayDistance(b.date, iso)
+  )
+  return dedupeNewsIds(sorted).slice(0, 40)
+}
+
 function numericSentiment(n: MarketNewsEvent): number {
   const v = n.sentiment_score ?? n.score
   if (typeof v === 'number' && !Number.isNaN(v)) return Math.max(-1, Math.min(1, v))
@@ -168,6 +218,16 @@ function faviconUrlFromArticle(url?: string): string | null {
   } catch {
     return null
   }
+}
+
+/** Prefer provider article image; else favicon from article URL host. */
+function articleThumbnailSrc(n: MarketNewsEvent): { src: string; isArticleImage: boolean } | null {
+  const raw = n.image_url?.trim()
+  if (raw && /^https?:\/\//i.test(raw)) {
+    return { src: raw, isArticleImage: true }
+  }
+  const fav = faviconUrlFromArticle(n.url)
+  return fav ? { src: fav, isArticleImage: false } : null
 }
 
 function findBarForTime(ohlcv: OhlcvBar[], t: Time | undefined): OhlcvBar | undefined {
@@ -246,6 +306,7 @@ export function ChartNewsOverlay({
   chartRef,
   candleSeriesRef,
   chartContainerRef,
+  interactionRootRef,
   chartReady,
   news,
   ohlcv,
@@ -255,6 +316,9 @@ export function ChartNewsOverlay({
   const tooltipRef = useRef<HTMLDivElement | null>(null)
   const latestParamRef = useRef<MouseEventParams<Time> | null>(null)
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  /** True while pointer is over the tooltip panel (chart crosshair often clears before this fires). */
+  const pointerOverTooltipRef = useRef(false)
+  const maybeHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const ohlcvRef = useRef(ohlcv)
   const contentKeyRef = useRef<string>('')
   const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -321,7 +385,6 @@ export function ChartNewsOverlay({
       hideTimerRef.current = null
     }
     el.style.visibility = 'visible'
-    el.style.pointerEvents = 'none'
     el.style.transition = 'opacity 150ms ease-out'
     requestAnimationFrame(() => {
       el.style.opacity = '1'
@@ -376,7 +439,7 @@ export function ChartNewsOverlay({
       }
       if (!ohlc) return null
 
-      const pool = collectNewsWindow(iso, newsByDay)
+      const pool = newsCandidatePool(iso, newsByDay, news, ohlcvRef.current)
       const newsItems = selectMoveRelatedNews(pool, iso, ohlc)
       const mode: 'full' | 'ohlc' = newsItems.length > 0 ? 'full' : 'ohlc'
 
@@ -434,7 +497,7 @@ export function ChartNewsOverlay({
         prevUp,
       }
     },
-    [candleSeriesRef, newsByDay, ticker]
+    [candleSeriesRef, news, newsByDay, ticker]
   )
 
   useEffect(() => {
@@ -483,24 +546,16 @@ export function ChartNewsOverlay({
       window.setTimeout(() => positionTooltip(layoutParam, next.mode), 0)
     }
 
-    const onCrosshairMove = (param: MouseEventParams<Time>) => {
-      const stats = computeStatsFromCrosshair(candles, ohlcvRef.current, param)
-      onStatsChangeRef.current(stats)
-
-      latestParamRef.current = param
-
-      if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current)
-      debounceTimerRef.current = window.setTimeout(flushTooltip, 50)
-    }
-
-    chart.subscribeCrosshairMove(onCrosshairMove)
-
-    const container = chartContainerRef.current
-    const onLeave = () => {
+    const clearTooltipUi = () => {
       latestParamRef.current = null
+      pointerOverTooltipRef.current = false
       if (debounceTimerRef.current) {
         clearTimeout(debounceTimerRef.current)
         debounceTimerRef.current = null
+      }
+      if (maybeHideTimerRef.current) {
+        clearTimeout(maybeHideTimerRef.current)
+        maybeHideTimerRef.current = null
       }
       hideTooltipAnimated()
       contentKeyRef.current = ''
@@ -519,12 +574,52 @@ export function ChartNewsOverlay({
       }
     }
 
-    container?.addEventListener('mouseleave', onLeave)
+    const onCrosshairMove = (param: MouseEventParams<Time>) => {
+      const stats = computeStatsFromCrosshair(candles, ohlcvRef.current, param)
+      onStatsChangeRef.current(stats)
+
+      if (param.time === undefined || param.time === null) {
+        if (debounceTimerRef.current) {
+          clearTimeout(debounceTimerRef.current)
+          debounceTimerRef.current = null
+        }
+        if (pointerOverTooltipRef.current) {
+          return
+        }
+        if (maybeHideTimerRef.current) clearTimeout(maybeHideTimerRef.current)
+        maybeHideTimerRef.current = window.setTimeout(() => {
+          maybeHideTimerRef.current = null
+          if (pointerOverTooltipRef.current) return
+          clearTooltipUi()
+        }, 260)
+        return
+      }
+
+      if (maybeHideTimerRef.current) {
+        clearTimeout(maybeHideTimerRef.current)
+        maybeHideTimerRef.current = null
+      }
+
+      latestParamRef.current = param
+
+      if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current)
+      debounceTimerRef.current = window.setTimeout(flushTooltip, 50)
+    }
+
+    chart.subscribeCrosshairMove(onCrosshairMove)
+
+    const leaveEl = interactionRootRef?.current ?? chartContainerRef.current
+    const onLeave = () => {
+      clearTooltipUi()
+    }
+
+    leaveEl?.addEventListener('mouseleave', onLeave)
 
     return () => {
       chart.unsubscribeCrosshairMove(onCrosshairMove)
-      container?.removeEventListener('mouseleave', onLeave)
+      leaveEl?.removeEventListener('mouseleave', onLeave)
       if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current)
+      if (maybeHideTimerRef.current) clearTimeout(maybeHideTimerRef.current)
       if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
     }
   }, [
@@ -534,6 +629,7 @@ export function ChartNewsOverlay({
     chartReady,
     chartRef,
     hideTooltipAnimated,
+    interactionRootRef,
     positionTooltip,
     showTooltipAnimated,
   ])
@@ -556,7 +652,6 @@ export function ChartNewsOverlay({
     padding: 14,
     fontFamily: "'Geist', sans-serif",
     fontSize: 12,
-    pointerEvents: 'none',
     visibility: 'hidden',
     opacity: 0,
     zIndex: 50,
@@ -570,11 +665,23 @@ export function ChartNewsOverlay({
   return (
     <div
       ref={tooltipRef}
-      className="fixed font-body"
+      className="pointer-events-none fixed font-body"
       style={{ ...panelStyle, ...panelDyn }}
     >
       {payload ? (
-        <>
+        <div
+          className="pointer-events-auto"
+          onMouseEnter={() => {
+            pointerOverTooltipRef.current = true
+            if (maybeHideTimerRef.current) {
+              clearTimeout(maybeHideTimerRef.current)
+              maybeHideTimerRef.current = null
+            }
+          }}
+          onMouseLeave={() => {
+            pointerOverTooltipRef.current = false
+          }}
+        >
           <div className="mb-2 flex flex-wrap items-center gap-1 border-b border-white/10 pb-2 text-[11px] text-slate-200">
             <span className="text-slate-300">📅</span>
             <span className="font-medium">{payload.headerDate}</span>
@@ -591,48 +698,68 @@ export function ChartNewsOverlay({
           </div>
 
           {payload.mode === 'full' && payload.newsItems[0] ? (
-            <div className="flex gap-3">
-              {(() => {
-                const n = payload.newsItems[0]
-                const lab = sentimentLabel(n)
-                const thumb = faviconUrlFromArticle(n.url)
-                return (
-                  <>
-                    <div className="relative h-14 w-14 shrink-0 overflow-hidden rounded-md bg-slate-800/90 ring-1 ring-white/10">
-                      <span className="absolute inset-0 flex items-center justify-center text-[22px] leading-none text-slate-500">
-                        📰
-                      </span>
-                      {thumb ? (
-                        <img
-                          src={thumb}
-                          alt=""
-                          className="relative z-10 h-full w-full bg-slate-900/95 object-contain p-1.5"
-                          loading="lazy"
-                          referrerPolicy="no-referrer"
-                          onError={(e) => {
-                            e.currentTarget.style.visibility = 'hidden'
-                          }}
-                        />
+            (() => {
+              const n = payload.newsItems[0]
+              const lab = sentimentLabel(n)
+              const thumb = articleThumbnailSrc(n)
+              const articleUrl = n.url?.trim()
+              const canOpen = Boolean(articleUrl && /^https?:\/\//i.test(articleUrl))
+              const body = (
+                <>
+                  <div className="relative h-14 w-14 shrink-0 overflow-hidden rounded-md bg-slate-800/90 ring-1 ring-white/10">
+                    <span className="absolute inset-0 flex items-center justify-center text-[22px] leading-none text-slate-500">
+                      📰
+                    </span>
+                    {thumb ? (
+                      <img
+                        src={thumb.src}
+                        alt=""
+                        className={`relative z-10 h-full w-full bg-slate-900/95 ${
+                          thumb.isArticleImage ? 'object-cover' : 'object-contain p-1.5'
+                        }`}
+                        loading="lazy"
+                        referrerPolicy="no-referrer"
+                        onError={(e) => {
+                          e.currentTarget.style.visibility = 'hidden'
+                        }}
+                      />
+                    ) : null}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-start gap-1.5">
+                      <span className={badgeClass(lab)}>{lab}</span>
+                      <span className="font-medium leading-snug text-slate-100">{n.title}</span>
+                    </div>
+                    {n.summary ? (
+                      <p className="mt-1 text-[11px] leading-relaxed text-slate-400">{n.summary}</p>
+                    ) : null}
+                    <div className="mt-1 text-[10px] text-slate-500">
+                      {n.source ? <span>{n.source}</span> : null}
+                      {n.source && n.impact ? <span> · </span> : null}
+                      {n.impact ? <span>{n.impact} impact</span> : null}
+                      {canOpen ? (
+                        <>
+                          <span> · </span>
+                          <span className="text-cyan-400/90">Open article ↗</span>
+                        </>
                       ) : null}
                     </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex flex-wrap items-start gap-1.5">
-                        <span className={badgeClass(lab)}>{lab}</span>
-                        <span className="font-medium leading-snug text-slate-100">{n.title}</span>
-                      </div>
-                      {n.summary ? (
-                        <p className="mt-1 text-[11px] leading-relaxed text-slate-400">{n.summary}</p>
-                      ) : null}
-                      <div className="mt-1 text-[10px] text-slate-500">
-                        {n.source ? <span>{n.source}</span> : null}
-                        {n.source && n.impact ? <span> · </span> : null}
-                        {n.impact ? <span>{n.impact} impact</span> : null}
-                      </div>
-                    </div>
-                  </>
-                )
-              })()}
-            </div>
+                  </div>
+                </>
+              )
+              return canOpen && articleUrl ? (
+                <a
+                  href={articleUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex gap-3 rounded-md outline-none ring-offset-2 ring-offset-slate-900 transition hover:bg-white/5 focus-visible:ring-2 focus-visible:ring-cyan-400/60"
+                >
+                  {body}
+                </a>
+              ) : (
+                <div className="flex gap-3">{body}</div>
+              )
+            })()
           ) : null}
 
           <div
@@ -662,7 +789,7 @@ export function ChartNewsOverlay({
               ) : null}
             </div>
           </div>
-        </>
+        </div>
       ) : null}
     </div>
   )

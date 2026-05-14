@@ -24,6 +24,8 @@ export type MarketNewsEvent = {
   impact?: string
   summary?: string
   url?: string
+  /** Article preview image from provider (e.g. NewsAPI urlToImage, AV banner_image). */
+  image_url?: string
 }
 
 export type MarketDataResponse = {

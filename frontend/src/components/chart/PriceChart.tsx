@@ -57,6 +57,7 @@ export function PriceChart() {
   }, [start])
 
   const containerRef = useRef<HTMLDivElement | null>(null)
+  const chartInteractionRef = useRef<HTMLDivElement | null>(null)
 
   const chartRef = useRef<IChartApi | null>(null)
   const candleRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
@@ -364,7 +365,7 @@ export function PriceChart() {
         </div>
       </div>
 
-      <div className="relative min-h-0 flex-1">
+      <div ref={chartInteractionRef} className="relative min-h-0 flex-1">
         <div
           ref={containerRef}
           className={`h-full min-h-[340px] w-full rounded-xl border border-border-subtle bg-bg-primary md:min-h-[400px]${
@@ -389,6 +390,7 @@ export function PriceChart() {
           chartRef={chartRef}
           candleSeriesRef={candleRef}
           chartContainerRef={containerRef}
+          interactionRootRef={chartInteractionRef}
           chartReady={chartReady}
           news={news}
           ohlcv={ohlcv}
