@@ -64,8 +64,20 @@ export const sessionApi = {
   delete: (id: string) => api.delete(`/sessions/${id}`).then((r) => r.data),
 }
 
+export type PortfolioItem = { ticker: string; notes?: string; added_at?: string }
+
+function portfolioFromListPayload(data: unknown): PortfolioItem[] {
+  if (Array.isArray(data)) return data as PortfolioItem[]
+  if (data && typeof data === 'object') {
+    const o = data as Record<string, unknown>
+    if (Array.isArray(o.portfolio)) return o.portfolio as PortfolioItem[]
+    if (Array.isArray(o.items)) return o.items as PortfolioItem[]
+  }
+  return []
+}
+
 export const portfolioApi = {
-  list: () => api.get('/portfolio').then((r) => r.data),
+  list: () => api.get('/portfolio').then((r) => portfolioFromListPayload(r.data)),
   add: (ticker: string, notes = '') =>
     api.post('/portfolio', { ticker, notes }).then((r) => r.data),
   remove: (ticker: string) =>

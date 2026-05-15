@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Plus, Trash2 } from 'lucide-react'
 import { useMemo, useState } from 'react'
 
-import { portfolioApi, sessionApi } from '../../api/client'
+import { portfolioApi, sessionApi, type PortfolioItem } from '../../api/client'
 import { useAppStore } from '../../store/useAppStore'
 
 function isValidTicker(raw: string) {
@@ -32,11 +32,8 @@ export function PortfolioPage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['portfolio'] }),
   })
 
-  const items = useMemo(() => {
-    const data = q.data
-    if (Array.isArray(data)) return data as Array<{ ticker: string; notes?: string }>
-    if (data?.items && Array.isArray(data.items)) return data.items as Array<{ ticker: string }>
-    return []
+  const items = useMemo((): PortfolioItem[] => {
+    return Array.isArray(q.data) ? q.data : []
   }, [q.data])
 
   async function openTicker(ticker: string) {

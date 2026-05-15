@@ -18,3 +18,5 @@ backend/data/chroma_store/
 frontend/node_modules/
 frontend/dist/
 
+docs/HANDOFF.md
+

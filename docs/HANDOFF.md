@@ -1,186 +1,288 @@
-# Financial Agent — engineering handoff (v2)
+# Financial Agent — Engineering Handoff
 
-This document is for the **next maintainer** or a **Claude (or other) assistant** taking over the repo. The codebase was consolidated around **FastAPI + React**; the legacy **Streamlit + `src/core/`** tree was removed to avoid duplicated agent logic and confusing layout.
-
----
-
-## How Claude should work with this project (mandatory discipline)
-
-**Rule:** Do not proceed with implementation until the human has confirmed the **plan** for that step. After each batch of edits, pause and ask the human to run the listed **Verification** commands (or to reply **approve** to delegate running them).
-
-Ask the human to reply **approve** before you:
-
-1. Change **Python or Node major versions**, or materially edit `backend/requirements.txt` / `frontend/package.json`.
-2. Change **SQLite schema**, Chroma collection names, or migration strategy under `backend/data/`.
-3. Edit **`TOOLS` definitions**, `execute_tool` routing, or **system prompts** in `backend/agents/orchestrator.py` (behavior, cost, and safety profile change).
-4. Remove **news/API fallbacks** or require keys that were previously optional (availability risk).
-5. Add **authentication**, **multi-tenancy**, or **PII-heavy logging** (compliance and scope change).
-
-After edits, verify in this order unless the human specifies otherwise:
-
-1. From repo root: `python -m pytest -q` (uses `pytest.ini` → `backend/tests`, `pythonpath=backend`).
-2. Backend smoke: `cd backend` then `uvicorn main:app --reload --port 8000` → `GET http://localhost:8000/health` returns JSON `status: ok`.
-3. Frontend smoke: `cd frontend && npm run dev` → pick a ticker → chart loads → chat sends a message and SSE stream completes.
-4. If news/macro regressions are suspected: confirm optional keys in `backend/.env` match `backend/.env.example`.
+**Audience:** Next maintainer, onboarding engineer, or AI assistant taking over the repo.  
+**Last updated:** May 2026 · **Stack version:** API `2.0.0` (FastAPI + React)
 
 ---
 
-## What this product is
+## Executive summary
 
-A **single-user research dashboard** (not a bank-grade multi-tenant platform):
+**Financial Agent** is a single-user stock research dashboard. Users pick a ticker, view OHLCV charts with news and sentiment overlays, and run a **multi-stage Groq LLM pipeline** (researcher → analyst → risk → debate → synthesis) that calls market-data tools (price ranges, macro, options, SEC filings, similar historical periods).
 
-- **Frontend (`frontend/`)**: React 19 + Vite + Tailwind v4 plugin; TanStack Query; Zustand store (`useAppStore`). Dev server proxies `/api` → `http://localhost:8000` (`vite.config.ts`).
-- **Backend (`backend/`)**: FastAPI, SSE chat (`sse-starlette`), SQLite + Chroma for sessions, chat history, watchlist, and semantic “similar period” search.
-- **AI**: `AgentOrchestrator` in `agents/orchestrator.py` mirrors the old four-stage pipeline (researcher with tools → analyst → risk debate → synthesis tokens), using **async Groq** and emitting structured SSE events for the UI stage bar.
+The codebase is **FastAPI (backend) + React/Vite (frontend)**. Legacy Streamlit and a duplicate `src/core/` tree were removed; all agent logic lives in `backend/agents/orchestrator.py`.
 
-**Not in scope today:** OAuth, billing, rate-limit UX, institutional data vendors, formal compliance sign-off.
+**This is not:** a multi-tenant brokerage, compliance-certified research product, or production trading system. Outputs are analytical drafts, not investment advice.
 
 ---
 
-## Repository layout (streamlined)
+## Features (product surface)
+
+| Area | What it does |
+|------|----------------|
+| **Ticker dashboard** | OHLCV from yfinance; period selector (5d–2y); sector filters; live price badge. |
+| **Chart + news overlay** | `lightweight-charts` price chart; news markers; draggable range bar; range → “Analyze with AI” injects `chart_context` into chat. |
+| **News feed** | Headlines from Finnhub → Alpha Vantage → NewsAPI → DuckDuckGo fallback chain; per-article **FinBERT** sentiment; category tags (earnings, product, etc.). |
+| **AI chat (SSE)** | Four visible stages + analyst↔risk debate + streamed synthesis; `AgentStageBar` in UI; 180s server timeout. |
+| **Sessions** | Per-ticker chat sessions; history persisted in SQLite; auto-created when user selects a ticker. |
+| **Portfolio / watchlist** | Add/remove tickers with optional notes (session-scoped API). |
+| **Range analysis API** | `POST /api/v1/analysis/range` — price stats + news for a date window (used by chart UI). |
+| **Insights** | `POST /api/v1/insights/news-price-blurb` — short news/price correlation text. |
+| **Similar periods** | Agent tool searches Chroma (semantic) then SQLite `historical_patterns` (sentiment similarity). |
+
+### Agent tools (7)
+
+Defined in `backend/agents/orchestrator.py` → executed by `execute_tool()`:
+
+1. `analyze_price_range` — OHLCV stats + news in a date window  
+2. `forecast_trend` — bullish/bearish probability from sentiment + momentum  
+3. `find_similar_periods` — Chroma + SQL historical pattern match  
+4. `summarize_news_category` — aggregate news by category  
+5. `get_macro_context` — FRED indicators (needs `FRED_API_KEY`)  
+6. `get_options_flow` — put/call ratio, IV via yfinance options chain  
+7. `get_sec_filings` — recent EDGAR filings  
+
+**Tool assignment by stage:**
+
+| Stage | Tools |
+|-------|--------|
+| Researcher | All except `forecast_trend` |
+| Analyst | `forecast_trend` only |
+| Risk | None (text critique) |
+| Synthesis | No tools; streams final report |
+
+---
+
+## Frameworks & dependencies
+
+### Backend (`backend/`)
+
+| Layer | Technology |
+|-------|------------|
+| API | **FastAPI** 0.115+, **uvicorn**, **pydantic-settings** |
+| Streaming | **sse-starlette** (`POST /api/v1/chat/stream`) |
+| LLM | **groq** async client (`AsyncGroq`) |
+| Market data | **yfinance**, **pandas**, **requests** |
+| Sentiment (local) | **transformers** + **torch** — `ProsusAI/finbert` |
+| Embeddings (local) | **sentence-transformers** — `all-MiniLM-L6-v2` |
+| Macro | **fredapi** (optional `FRED_API_KEY`) |
+| Persistence | **SQLite** (sessions, chat, news cache, patterns) |
+| Vector search | **ChromaDB** (file-based under `data/chroma_store`) |
+| Tests | **pytest**, **pytest-asyncio** |
+
+### Frontend (`frontend/`)
+
+| Layer | Technology |
+|-------|------------|
+| UI | **React 19**, **TypeScript** |
+| Build | **Vite 8**, `@vitejs/plugin-react` |
+| Styling | **Tailwind CSS v4** (`@tailwindcss/vite`) |
+| State | **Zustand** (`useAppStore`) |
+| Server state | **TanStack React Query** (`useMarketData`) |
+| HTTP | **axios** → `/api/v1` (dev proxy to `:8000`) |
+| Charts | **lightweight-charts** v5 |
+| Markdown (chat) | **react-markdown** |
+| Icons | **lucide-react** |
+
+### Models in use
+
+| Role | Model / service | Config |
+|------|-----------------|--------|
+| **All LLM stages** | `meta-llama/llama-4-scout-17b-16e-instruct` | `GROQ_MODEL` in `.env` (default in `core/config.py`) |
+| **News sentiment** | `ProsusAI/finbert` (local, ~440MB first download) | Warmed on API startup in background |
+| **Pattern embeddings** | `all-MiniLM-L6-v2` | Chroma collection `historical_patterns` |
+
+Provider: **[Groq](https://groq.com)** — requires `GROQ_API_KEY`.
+
+---
+
+## Architecture
+
+### System diagram
+
+```mermaid
+flowchart TB
+  subgraph FE["React frontend (Vite :5173)"]
+    UI[TopBar / Sidebar / MainContent]
+    Chart[PriceChart + RangeBar + News overlay]
+    Chat[ChatPanel + useSSEChat]
+    Store[Zustand useAppStore]
+    UI --> Chart
+    UI --> Chat
+    Store --> UI
+  end
+
+  subgraph API["FastAPI backend (:8000)"]
+    REST["/api/v1/market · sessions · portfolio · analysis · insights"]
+    SSE["POST /api/v1/chat/stream"]
+    ORCH[AgentOrchestrator]
+    TOOLS[execute_tool + market_data.py]
+    REST --> TOOLS
+    SSE --> ORCH
+    ORCH --> TOOLS
+  end
+
+  subgraph DATA["Local data"]
+    SQL[(SQLite financial_agent.db)]
+    CHR[(ChromaDB chroma_store)]
+  end
+
+  subgraph EXT["External"]
+    GROQ[Groq API]
+    YF[yfinance]
+    NEWS[Finnhub / AV / NewsAPI / DDG]
+    FRED[FRED API]
+    SEC[SEC EDGAR]
+  end
+
+  FE -->|REST + SSE| API
+  ORCH --> GROQ
+  TOOLS --> YF
+  TOOLS --> NEWS
+  TOOLS --> FRED
+  TOOLS --> SEC
+  API --> SQL
+  API --> CHR
+  ORCH --> SQL
+  TOOLS --> SQL
+```
+
+### Multi-agent pipeline (chat)
+
+```mermaid
+sequenceDiagram
+  participant U as User
+  participant API as chat/stream
+  participant O as AgentOrchestrator
+  participant G as Groq
+
+  U->>API: message + ticker [+ chart_context]
+  API->>O: fetch_stock_data, load_history
+  O->>G: Researcher (+ tools)
+  O-->>API: stage_start / stage_complete
+  O->>G: Analyst (+ forecast_trend)
+  O-->>API: stage_complete
+  O->>G: Risk (no tools)
+  O-->>API: stage_complete
+  O-->>API: debate_turn ×3
+  O->>G: Analyst rebuttal
+  O->>G: Synthesis (stream)
+  O-->>API: synthesis_token ×N
+  O-->>API: done
+```
+
+**SSE event types** (`backend/api/v1/chat.py`):
+
+| Event | Payload highlights |
+|-------|-------------------|
+| `stage_start` | `stage`: `researcher` \| `analyst` \| `risk` \| `synthesis` |
+| `stage_complete` | `stage`, `summary` (truncated) |
+| `debate_turn` | `speaker`, `content`, `turn` |
+| `synthesis_token` | `token` |
+| `done` | `session_id` |
+| `error` | `message` |
+
+**Note:** `backend/api/v1/ws.py` is a placeholder; chat uses **SSE only** (`frontend/src/hooks/useSSEChat.ts`).
+
+### Repository layout
 
 ```
 financial_agent/
-  README.md
-  requirements.txt          # mirrors backend stack; pip from repo root
-  pytest.ini                # testpaths=backend/tests, pythonpath=backend
-  .gitignore
-  docs/
-    HANDOFF.md              # this file
-  backend/
-    main.py                 # FastAPI app + lifespan (DB init, FinBERT warm task)
-    core/config.py          # pydantic-settings; loads backend/.env when cwd is backend/
-    api/v1/                 # market, chat (SSE), analysis, sessions, portfolio
-    api/v1/ws.py            # websocket routes (if used by UI — confirm in client)
-    agents/orchestrator.py  # TOOLS[], execute_tool, AgentOrchestrator
-    tools/market_data.py    # yfinance, news, FinBERT, FRED, SEC helpers
-    db/db.py                # SQLite + Chroma
-    data/                   # local DB + chroma (gitignored)
-    tests/
-    Dockerfile
-    .env.example
-  frontend/
-    src/
-      api/client.ts         # axios base /api/v1
-      store/useAppStore.ts
-      components/           # layout, dashboard, chart, news, chat, ui, search
-    vite.config.ts
-    Dockerfile
+├── README.md
+├── requirements.txt          # mirrors backend; pytest from repo root
+├── pytest.ini
+├── docs/
+│   └── HANDOFF.md            # this file
+├── backend/
+│   ├── main.py               # FastAPI app, lifespan (DB init, FinBERT warm)
+│   ├── core/config.py        # pydantic-settings, .env loading
+│   ├── api/v1/               # market, chat, analysis, sessions, portfolio, insights
+│   ├── agents/orchestrator.py
+│   ├── tools/market_data.py
+│   ├── db/db.py
+│   ├── data/                 # sqlite + chroma (gitignored; may exist locally)
+│   ├── tests/
+│   ├── .env.example
+│   └── requirements.txt
+└── frontend/
+    ├── src/
+    │   ├── api/client.ts
+    │   ├── store/useAppStore.ts
+    │   ├── hooks/            # useSSEChat, useMarketData
+    │   └── components/       # layout, chart, news, chat, shared, ui
+    ├── vite.config.ts        # proxies /api → localhost:8000
+    └── package.json
 ```
 
-**Removed (intentionally):** `app.py`, `src/core/`, root `tests/`, `frontend/dist/`, unused Vite boilerplate (`main.ts`, `counter.ts`, `style.css`), and the orphaned `frontend/src/components/panels/` copy of components that nothing imported.
+---
+
+## API reference (quick)
+
+Base path: `/api/v1`
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/health` | Health check (on app root, not under v1) |
+| `GET` | `/market/{ticker}` | OHLCV + news + sentiment (`period`, `include_news`) |
+| `GET` | `/market/{ticker}/sentiment` | Aggregate sentiment |
+| `POST` | `/chat/stream` | SSE multi-agent chat |
+| `POST` | `/analysis/range` | Range stats for chart |
+| `POST` | `/insights/news-price-blurb` | Short insight text |
+| `GET/POST/DELETE` | `/sessions`, `/sessions/{id}` | Session CRUD |
+| `GET/POST/DELETE` | `/portfolio`, `/portfolio/{ticker}` | Watchlist |
 
 ---
 
 ## Configuration
 
-| Variable | Required | Used for |
-|----------|----------|----------|
-| `GROQ_API_KEY` | Yes | All LLM calls |
+Copy `backend/.env.example` → `backend/.env` (and optionally repo-root `.env` for overrides).
+
+| Variable | Required | Purpose |
+|----------|----------|---------|
+| `GROQ_API_KEY` | **Yes** | All LLM calls |
+| `GROQ_MODEL` | No | Default: `meta-llama/llama-4-scout-17b-16e-instruct` |
 | `FRED_API_KEY` | No | Macro tool |
 | `FINNHUB_API_KEY` | No | Primary company news |
-| `ALPHAVANTAGE_API_KEY` | No | News |
-| `NEWSAPI_API_KEY` | No | Broad news |
-| `DATABASE_URL` | No | Defaults to sqlite under `backend/data/` |
-| `CHROMA_PATH` | No | Vector store directory |
-| `CORS_ORIGINS` | No | JSON list in `.env.example` |
+| `ALPHAVANTAGE_API_KEY` | No | News fallback |
+| `NEWSAPI_API_KEY` | No | News fallback |
+| `DATABASE_URL` | No | Default `sqlite:///./data/financial_agent.db` |
+| `CHROMA_PATH` | No | Default `./data/chroma_store` |
+| `CORS_ORIGINS` | No | JSON list for frontend origins |
 
-`get_settings()` in `backend/core/config.py` loads **`backend/.env`** by absolute path and **ignores unknown keys**, so extra variables (e.g. from a root `.env` or shell) do not crash startup. SQLite/Chroma relative paths in settings still assume the server process **cwd** is `backend/` (as in the README `uvicorn` example).
+`get_settings()` loads `backend/.env` first, then repo-root `.env` (later wins). Unknown keys are ignored.
 
----
-
-## Architecture (runtime)
-
-```mermaid
-flowchart LR
-  subgraph fe [React frontend]
-    UI[Charts / News / Chat]
-  end
-  subgraph api [FastAPI backend]
-    R1[REST market sessions portfolio]
-    SSE[SSE /chat/stream]
-    ORCH[AgentOrchestrator]
-  end
-  DB[(SQLite)]
-  CH[(Chroma)]
-  Groq[Groq API]
-  Ext[yfinance FRED APIs news]
-  UI --> R1
-  UI --> SSE
-  SSE --> ORCH
-  ORCH --> Groq
-  ORCH --> DB
-  ORCH --> CH
-  R1 --> Ext
-```
-
-**Chat SSE event types** (see `backend/api/v1/chat.py`): `stage_start`, `stage_complete`, `debate_turn`, `synthesis_token`, `done`, `error`.
+**Working directory:** Run uvicorn from `backend/` so relative SQLite/Chroma paths resolve correctly.
 
 ---
 
-## Claude for Financial Services (external skills)
-
-This repo **does not vendor** [Claude for Financial Services](https://github.com/anthropics/claude-for-financial-services). Use that project inside **Claude Code / Cowork** when you need slash workflows (`/dcf`, `/comps`, etc.) or IB-style skills.
-
-**Patterns worth mirroring here (conceptual):**
-
-- Prefer **authenticated or MCP-backed** figures for valuation and comps over ad-hoc web scraping when you harden the product.
-- Treat all model output as **draft research**, not advice — align disclaimers with upstream guidance.
-- **Human-in-the-loop:** any automation (scheduled reports, alerts) should surface uncertainty and data vintage.
-
----
-
-## Frontend — quality notes and improvement backlog
-
-| Area | Observation |
-|------|----------------|
-| **Duplication risk** | Large surface under `components/layout/` vs `components/dashboard/`; when adding features, pick one home per screen to avoid twin components. |
-| **Dead code hygiene** | After refactors, grep for unused exports; the repo previously accumulated unreferenced `panels/` copies. |
-| **Loading / errors** | Ensure every async view has skeleton/error states; FinBERT first load can be slow (backend warms in background, but first request may still stall). |
-| **SSE UX** | Long-running chat: expose timeout messaging (backend uses 180s wait) and a cancel story if product needs it. |
-| **Accessibility** | Charts and tickers: verify keyboard focus order, live regions for streaming text, color contrast for sentiment reds/greens. |
-| **API base URL** | Dev uses Vite proxy; production build needs nginx (see `frontend/nginx.conf`) or env-based API origin — confirm deployment plan before changing `client.ts`. |
-
----
-
-## Backend / data — defects and risks
-
-| Topic | Detail |
-|-------|--------|
-| **Dual maintenance** | `agents/orchestrator.py` was copied from the legacy monolith with a comment “do not modify” — in practice, **any** tool change must stay consistent with `execute_tool` and frontend expectations. Consider extracting shared tool schemas once. |
-| **Secrets in logs** | Startup prints and broad exception handlers can leak context; trim before any shared deployment. |
-| **SQLite concurrency** | Single-file SQLite is fine for one user; concurrent writers will bottleneck — document before scaling. |
-| **Torch / CPU** | `torch` + `transformers` are heavy; CI should cache wheels or use CPU index mirrors. |
-| **WebSocket vs SSE** | `ws.py` is mounted separately; confirm whether the React client uses WebSockets or only SSE (`useSSEChat.ts`) to avoid half-maintained paths. |
-
----
-
-## Automation and “better connection” ideas
-
-- **CI:** GitHub Action running `python -m pytest -q` on push; optional `npm run build` for the frontend.
-- **Compose:** Single `docker-compose.yml` wiring `frontend` (nginx static) + `backend` + optional env file — not yet first-class in repo.
-- **MCP:** For institutional workflows, expose read-only MCP tools that wrap the same `tools/market_data` functions instead of duplicating fetch logic in another agent runtime.
-
----
-
-## Quick commands (cheat sheet)
+## Local development
 
 ```bash
-# Python
+# Backend
 python -m venv venv
-venv\Scripts\activate
+venv\Scripts\activate          # Windows
 pip install -r backend/requirements.txt
+copy backend\.env.example backend\.env   # set GROQ_API_KEY
 cd backend
-uvicorn main:app --reload --port 8000
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
 
-# Frontend
+# Frontend (separate terminal)
 cd frontend
 npm ci
 npm run dev
+```
 
-# Tests (from repo root)
+**Tests** (repo root):
+
+```bash
 python -m pytest -q
 ```
+
+**Smoke checklist**
+
+1. `GET http://localhost:8000/health` → `status: ok`, `model` set  
+2. Open Vite URL → pick ticker → chart loads  
+3. Send chat message → stage bar advances → synthesis completes  
+4. Optional: confirm news with/without Finnhub key  
 
 ---
 
@@ -188,25 +290,51 @@ python -m pytest -q
 
 | Concern | Location |
 |---------|----------|
-| LLM stages, tools, streaming | `backend/agents/orchestrator.py` |
-| Market data, sentiment, news | `backend/tools/market_data.py` |
-| Persistence | `backend/db/db.py` |
+| LLM stages, tools, prompts, streaming | `backend/agents/orchestrator.py` |
+| Prices, news, FinBERT, FRED, SEC, options | `backend/tools/market_data.py` |
+| SQLite schema, Chroma, sessions | `backend/db/db.py` |
 | HTTP routes | `backend/api/v1/*.py` |
-| App settings | `backend/core/config.py` |
-| Global UI state | `frontend/src/store/useAppStore.ts` |
-| HTTP client | `frontend/src/api/client.ts` |
+| Settings | `backend/core/config.py` |
+| Global UI state, tabs, chart range | `frontend/src/store/useAppStore.ts` |
+| API client types | `frontend/src/api/client.ts` |
+| SSE chat UX | `frontend/src/hooks/useSSEChat.ts` |
+| Chart | `frontend/src/components/chart/` |
 
 ---
 
-## Handoff to “Claude chat bot” prompt (paste as system or first message)
+## Known limitations & risks
 
-You are maintaining the **Financial Agent** repo. Stack: **FastAPI backend** in `backend/`, **React + Vite frontend** in `frontend/`. Legacy Streamlit was removed.
+| Topic | Detail |
+|-------|--------|
+| **Single-user SQLite** | Fine for local dev; concurrent writes will bottleneck. |
+| **Heavy deps** | `torch` + FinBERT slow first request; CI should cache Hugging Face models. |
+| **Tool/schema drift** | `TOOLS` in orchestrator must stay in sync with `execute_tool` and UI expectations. |
+| **180s chat timeout** | Long analyses may hit `asyncio.wait_for` in `chat.py`. |
+| **WebSocket stub** | Do not wire chat to `ws.py` without implementing routes. |
+| **Production API URL** | Dev uses Vite proxy; production needs reverse proxy or env-based `baseURL` in `client.ts`. |
+| **No auth** | Do not expose publicly without adding auth and rate limits. |
 
-**Operating rules:**
+---
 
-1. Before dependency, schema, prompt, or tool-schema changes, ask the human for explicit **approve**.
-2. After each change set, ask the human to run **`python -m pytest -q`** from repo root and a **manual UI smoke** (ticker → chart → chat).
-3. Read **`docs/HANDOFF.md`** fully before large edits; prefer small diffs that match existing style.
-4. For institutional finance workflows, defer to external **Claude for Financial Services** patterns; do not invent regulated advice copy.
+## Maintainer discipline (for humans + AI assistants)
 
-End of handoff.
+Before changing **dependencies, DB schema, tool definitions, or system prompts**, get explicit human approval.
+
+After edits, run:
+
+1. `python -m pytest -q` (repo root)  
+2. Backend + frontend smoke (ticker → chart → chat)  
+
+For institutional workflows (DCF, comps, etc.), use external **[Claude for Financial Services](https://github.com/anthropics/claude-for-financial-services)** — not bundled here.
+
+---
+
+## Handoff prompt (paste for a new AI session)
+
+You are maintaining **Financial Agent**: FastAPI in `backend/`, React+Vite in `frontend/`. Read `docs/HANDOFF.md` before large changes. LLM is **Groq** (`meta-llama/llama-4-scout-17b-16e-instruct` by default). Chat is **SSE**, not WebSocket. Do not treat model output as investment advice. Ask for human **approve** before dependency, schema, or prompt/tool changes; then run `python -m pytest -q` and UI smoke.
+
+---
+
+## Disclaimer
+
+All outputs are analytical drafts for research and education, **not** investment advice.
