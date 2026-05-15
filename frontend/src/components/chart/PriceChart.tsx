@@ -248,6 +248,24 @@ export function PriceChart() {
       window.removeEventListener('pointercancel', onWindowUp)
     }
 
+    const coordinateToTimeInPlot = (rawX: number): Time | null => {
+      const w = el.clientWidth
+      if (w < 1) return null
+      const hi = w - 1
+      const x0 = Math.max(0, Math.min(hi, Math.round(rawX)))
+      for (let d = 0; d <= 40; d++) {
+        const xLo = Math.max(0, x0 - d)
+        const xHi = Math.min(hi, x0 + d)
+        const tLo = ts.coordinateToTime(xLo)
+        if (tLo != null) return tLo as Time
+        if (xLo !== xHi) {
+          const tHi = ts.coordinateToTime(xHi)
+          if (tHi != null) return tHi as Time
+        }
+      }
+      return null
+    }
+
     const onWindowUp = (e: PointerEvent) => {
       if (!drag || e.pointerId !== drag.pointerId) return
       const originX = drag.originX
@@ -256,16 +274,18 @@ export function PriceChart() {
       setDragOverlay(null)
       finishWindowListeners()
 
-      if (originX < endX) {
-        const tStart = ts.coordinateToTime(originX)
-        const tEnd = ts.coordinateToTime(endX)
-        const isoStart = tStart != null ? timeToIsoDay(tStart as Time) : null
-        const isoEnd = tEnd != null ? timeToIsoDay(tEnd as Time) : null
-        if (isoStart && isoEnd) {
-          const [from, to] = isoStart <= isoEnd ? [isoStart, isoEnd] : [isoEnd, isoStart]
-          setRange(from, to)
-          setSelectMode(false)
-        }
+      const xLeft = Math.min(originX, endX)
+      const xRight = Math.max(originX, endX)
+      if (xRight - xLeft < 2) return
+
+      const tStart = coordinateToTimeInPlot(xLeft)
+      const tEnd = coordinateToTimeInPlot(xRight)
+      const isoStart = tStart != null ? timeToIsoDay(tStart) : null
+      const isoEnd = tEnd != null ? timeToIsoDay(tEnd) : null
+      if (isoStart && isoEnd) {
+        const [from, to] = isoStart <= isoEnd ? [isoStart, isoEnd] : [isoEnd, isoStart]
+        setRange(from, to)
+        setSelectMode(false)
       }
     }
 
@@ -368,10 +388,9 @@ export function PriceChart() {
       <div ref={chartInteractionRef} className="relative min-h-0 flex-1">
         <div
           ref={containerRef}
-          className={`h-full min-h-[340px] w-full rounded-xl border border-border-subtle bg-bg-primary md:min-h-[400px]${
+          className={`h-full min-h-0 w-full rounded-xl border border-border-subtle bg-bg-primary${
             selectMode ? ' cursor-crosshair' : ''
           }`}
-          style={{ minHeight: 320 }}
         />
 
         {dragOverlay ? (

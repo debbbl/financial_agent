@@ -32,7 +32,7 @@ export function ChatPanel() {
   useEffect(() => {
     const el = listRef.current
     if (!el) return
-    el.scrollTop = el.scrollHeight
+    el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
   }, [messages, isStreaming])
 
   const contextChip = useMemo(() => {
@@ -41,16 +41,18 @@ export function ChatPanel() {
   }, [end, start, ticker])
 
   return (
-    <div className="flex h-full min-h-[60vh] flex-col">
-      <AgentStageBar
-        stages={stages}
-        debate={debateTurns}
-        isStreaming={isStreaming || messages.length > 0}
-      />
+    <div className="flex h-full min-h-0 flex-col overflow-hidden">
+      <div className="shrink-0">
+        <AgentStageBar
+          stages={stages}
+          debate={debateTurns}
+          isStreaming={isStreaming || messages.length > 0}
+        />
+      </div>
 
       <div
         ref={listRef}
-        className="flex-1 overflow-y-auto rounded-lg border border-border bg-bg px-3 py-3"
+        className="min-h-0 flex-1 overflow-y-auto scroll-smooth rounded-lg border border-border bg-bg px-3 py-3"
       >
         <div className="space-y-3">
           {messages.length === 0 ? (
@@ -66,7 +68,7 @@ export function ChatPanel() {
         </div>
       </div>
 
-      <div className="sticky bottom-0 mt-3 rounded-lg border border-border bg-bg-card p-3">
+      <div className="mt-3 shrink-0 rounded-lg border border-border bg-bg-card p-3">
         <div className="mb-2 flex items-center gap-2">
           {contextChip ? (
             <button

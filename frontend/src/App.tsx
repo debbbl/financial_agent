@@ -34,8 +34,8 @@ export function App() {
       <div className="flex pt-14">
         <Sidebar />
 
-        <main className="min-h-[calc(100dvh-56px)] min-w-0 flex-1 overflow-y-auto">
-          <div className="mx-auto max-w-7xl px-4 py-4">
+        <main className="min-h-[calc(100dvh-56px)] min-w-0 flex-1 overflow-x-hidden overflow-y-auto">
+          <div className="mx-auto min-h-0 max-w-7xl px-4 py-4">
             <MainContent />
           </div>
         </main>

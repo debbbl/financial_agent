@@ -119,3 +119,27 @@ export const chatApi = {
   streamPath: '/chat/stream' as const,
   buildStreamBody: buildChatStreamBody,
 }
+
+/** POST /insights/news-price-blurb — short LLM tie-in for chart hover tooltips. */
+export type NewsPriceBlurbRequest = {
+  ticker: string
+  bar_date: string
+  open: number
+  high: number
+  low: number
+  close: number
+  day_change_pct?: number | null
+  prev_bar_change_pct?: number | null
+  news_title: string
+  news_summary?: string | null
+  news_sentiment?: string | null
+  news_impact?: string | null
+  news_category?: string | null
+}
+
+export const insightsApi = {
+  newsPriceBlurb: (body: NewsPriceBlurbRequest, signal?: AbortSignal) =>
+    api
+      .post<{ blurb: string }>('/insights/news-price-blurb', body, { signal })
+      .then((r) => r.data),
+}

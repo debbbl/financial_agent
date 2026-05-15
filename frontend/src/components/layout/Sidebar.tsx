@@ -131,7 +131,7 @@ export function Sidebar() {
                   setSession(id)
                   setTab('chart')
                 }}
-                className="w-full rounded-lg border border-transparent px-2 py-2 text-left text-sm text-text-muted transition hover:border-border hover:bg-bg-card hover:text-text"
+                className="w-full rounded-lg border border-transparent px-2 py-2 text-left text-sm text-text-muted transition-[filter,background-color,border-color,color] duration-200 hover:border-border hover:bg-bg-card hover:text-text hover:brightness-110"
               >
                 <span className="font-data text-cyan">{ticker || '—'}</span>
                 {ts ? (

@@ -83,7 +83,7 @@ export function MainContent() {
 
   return (
     <Suspense key={suspenseKey} fallback={<SkeletonPage />}>
-      <div className="animate-fade-in">{panel}</div>
+      <div className="animate-fade-in min-h-0">{panel}</div>
     </Suspense>
   )
 }

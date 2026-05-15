@@ -10,6 +10,7 @@ import {
 
 import type { IChartApi, ISeriesApi, MouseEventParams, Time } from 'lightweight-charts'
 
+import { insightsApi } from '../../api/client'
 import type { MarketNewsEvent, OhlcvBar } from '../../hooks/useMarketData'
 
 export type StatsRow = { open: number; high: number; low: number; close: number; volume: number }
@@ -197,6 +198,31 @@ function scoreNewsForBarMove(n: MarketNewsEvent, hoveredIso: string, ohlc: Stats
   return recency * (alignment * (0.55 + moveMag) + impactWeight(n) * 1.15 + categoryMoveWeight(n) * 0.55)
 }
 
+/** Synthetic “best plausible” headline for this bar — same scoring axes, upper bound for normalization. */
+function idealHeadlineForBar(hoveredIso: string, ohlc: StatsRow): MarketNewsEvent {
+  const dayRet = ohlc.open !== 0 ? (ohlc.close - ohlc.open) / ohlc.open : 0
+  const bullishBar = dayRet >= 0
+  return {
+    date: hoveredIso,
+    title: '',
+    sentiment: bullishBar ? 'bullish' : 'bearish',
+    sentiment_score: bullishBar ? 1 : -1,
+    impact: 'high',
+    category: 'earnings',
+  }
+}
+
+function maxTheoreticalMoveNewsScore(hoveredIso: string, ohlc: StatsRow): number {
+  return scoreNewsForBarMove(idealHeadlineForBar(hoveredIso, ohlc), hoveredIso, ohlc)
+}
+
+/** 0–100: how strongly this headline scores vs. a theoretical best match to the bar’s move. */
+function moveNewsRelevancePercent(n: MarketNewsEvent, hoveredIso: string, ohlc: StatsRow): number {
+  const actual = scoreNewsForBarMove(n, hoveredIso, ohlc)
+  const cap = Math.max(0.45, maxTheoreticalMoveNewsScore(hoveredIso, ohlc))
+  return Math.max(0, Math.min(100, Math.round((actual / cap) * 100)))
+}
+
 function selectMoveRelatedNews(
   candidates: MarketNewsEvent[],
   hoveredIso: string,
@@ -289,8 +315,14 @@ type TooltipPayload = {
   mode: 'full' | 'ohlc'
   headerDate: string
   ticker: string
+  /** Bar trading day YYYY-MM-DD */
+  barDateIso: string
   dayPct: string | null
   dayUp: boolean
+  dayChangePctNum: number | null
+  prevBarChangePctNum: number | null
+  /** 0–100 heuristic: headline vs. this bar’s move (see tooltip title). */
+  moveNewsRelevancePct: number | null
   newsItems: MarketNewsEvent[]
   ohlc: StatsRow
   pctFromPrev: string | null
@@ -298,8 +330,10 @@ type TooltipPayload = {
 }
 
 const GAP = 16
-const EST_W = 320
-const EST_H_FULL = 280
+const TOOLTIP_MIN_W = 300
+const TOOLTIP_MAX_W = 380
+const EST_W = 352
+const EST_H_FULL = 380
 const EST_H_OHLC = 120
 
 export function ChartNewsOverlay({
@@ -339,6 +373,78 @@ export function ChartNewsOverlay({
   }, [news])
 
   const [payload, setPayload] = useState<TooltipPayload | null>(null)
+  const [aiMoveBlurb, setAiMoveBlurb] = useState<string | null>(null)
+  const [aiMoveBlurbLoading, setAiMoveBlurbLoading] = useState(false)
+  const blurbCacheRef = useRef<Map<string, string>>(new Map())
+  const blurbAbortRef = useRef<AbortController | null>(null)
+  const blurbExpectedKeyRef = useRef<string>('')
+
+  useEffect(() => {
+    blurbAbortRef.current?.abort()
+    blurbAbortRef.current = null
+
+    if (!payload || payload.mode !== 'full' || !payload.newsItems[0]) {
+      setAiMoveBlurb(null)
+      setAiMoveBlurbLoading(false)
+      blurbExpectedKeyRef.current = ''
+      return
+    }
+
+    const key = payload.contentKey
+    blurbExpectedKeyRef.current = key
+    const cached = blurbCacheRef.current.get(key)
+    if (cached) {
+      setAiMoveBlurb(cached)
+      setAiMoveBlurbLoading(false)
+      return
+    }
+
+    setAiMoveBlurb(null)
+    setAiMoveBlurbLoading(true)
+    const ac = new AbortController()
+    blurbAbortRef.current = ac
+    const expectedKey = key
+
+    const tid = window.setTimeout(() => {
+      const n = payload.newsItems[0]
+      if (!n) return
+      void insightsApi
+        .newsPriceBlurb(
+          {
+            ticker: payload.ticker,
+            bar_date: payload.barDateIso,
+            open: payload.ohlc.open,
+            high: payload.ohlc.high,
+            low: payload.ohlc.low,
+            close: payload.ohlc.close,
+            day_change_pct: payload.dayChangePctNum,
+            prev_bar_change_pct: payload.prevBarChangePctNum,
+            news_title: n.title,
+            news_summary: n.summary ?? null,
+            news_sentiment: n.sentiment ?? null,
+            news_impact: n.impact ?? null,
+            news_category: n.category ?? null,
+          },
+          ac.signal
+        )
+        .then((res) => {
+          if (blurbExpectedKeyRef.current !== expectedKey) return
+          blurbCacheRef.current.set(expectedKey, res.blurb)
+          setAiMoveBlurb(res.blurb)
+          setAiMoveBlurbLoading(false)
+        })
+        .catch(() => {
+          if (ac.signal.aborted) return
+          if (blurbExpectedKeyRef.current !== expectedKey) return
+          setAiMoveBlurbLoading(false)
+        })
+    }, 400)
+
+    return () => {
+      window.clearTimeout(tid)
+      ac.abort()
+    }
+  }, [payload])
 
   const positionTooltip = useCallback(
     (param: MouseEventParams<Time>, mode: 'full' | 'ohlc') => {
@@ -355,7 +461,7 @@ export function ChartNewsOverlay({
       const vw = window.innerWidth
       const vh = window.innerHeight
 
-      const estW = Math.min(340, Math.max(280, el.offsetWidth || EST_W))
+      const estW = Math.min(TOOLTIP_MAX_W, Math.max(TOOLTIP_MIN_W, el.offsetWidth || EST_W))
       const estH = mode === 'full' ? EST_H_FULL : EST_H_OHLC
 
       let left = rect.left + point.x + GAP
@@ -442,6 +548,8 @@ export function ChartNewsOverlay({
       const pool = newsCandidatePool(iso, newsByDay, news, ohlcvRef.current)
       const newsItems = selectMoveRelatedNews(pool, iso, ohlc)
       const mode: 'full' | 'ohlc' = newsItems.length > 0 ? 'full' : 'ohlc'
+      const moveNewsRelevancePct =
+        newsItems.length > 0 ? moveNewsRelevancePercent(newsItems[0], iso, ohlc) : null
 
       const idx = ohlcvRef.current.findIndex((b) => {
         const bt = barTime(b)
@@ -449,10 +557,12 @@ export function ChartNewsOverlay({
       })
       let pctFromPrev: string | null = null
       let prevUp = true
+      let prevBarChangePctNum: number | null = null
       if (idx > 0) {
         const prev = ohlcvRef.current[idx - 1]
         if (prev && prev.close !== 0) {
           const p = ((ohlc.close - prev.close) / prev.close) * 100
+          prevBarChangePctNum = p
           pctFromPrev = `${p >= 0 ? '+' : ''}${p.toFixed(2)}%`
           prevUp = p >= 0
         }
@@ -460,8 +570,10 @@ export function ChartNewsOverlay({
 
       let dayPct: string | null = null
       let dayUp = true
+      let dayChangePctNum: number | null = null
       if (ohlc.open !== 0) {
         const d = ((ohlc.close - ohlc.open) / ohlc.open) * 100
+        dayChangePctNum = d
         dayPct = `${d >= 0 ? '+' : ''}${d.toFixed(2)}%`
         dayUp = d >= 0
       }
@@ -489,8 +601,12 @@ export function ChartNewsOverlay({
         mode,
         headerDate,
         ticker: ticker ?? '—',
+        barDateIso: iso,
         dayPct,
         dayUp,
+        dayChangePctNum,
+        prevBarChangePctNum,
+        moveNewsRelevancePct,
         newsItems,
         ohlc,
         pctFromPrev,
@@ -647,8 +763,8 @@ export function ChartNewsOverlay({
     borderRadius: 12,
     border: '1px solid rgba(255,255,255,0.1)',
     boxShadow: '0 20px 40px rgba(0,0,0,0.3)',
-    minWidth: 280,
-    maxWidth: 340,
+    minWidth: TOOLTIP_MIN_W,
+    maxWidth: TOOLTIP_MAX_W,
     padding: 14,
     fontFamily: "'Geist', sans-serif",
     fontSize: 12,
@@ -659,7 +775,7 @@ export function ChartNewsOverlay({
 
   const panelDyn: CSSProperties =
     payload?.mode === 'ohlc'
-      ? { minWidth: 240, maxWidth: 300, padding: 10 }
+      ? { minWidth: 252, maxWidth: 320, padding: 10 }
       : {}
 
   return (
@@ -730,8 +846,28 @@ export function ChartNewsOverlay({
                       <span className={badgeClass(lab)}>{lab}</span>
                       <span className="font-medium leading-snug text-slate-100">{n.title}</span>
                     </div>
+                    {payload.moveNewsRelevancePct != null ? (
+                      <div className="mt-1">
+                        <span
+                          className="inline-flex items-center rounded border border-cyan-500/30 bg-cyan-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold tabular-nums text-cyan-100"
+                          title="Heuristic 0–100 score from headline date, sentiment vs. session direction, impact, and category, compared to a theoretical best match for this bar."
+                        >
+                          Move relevance ~{payload.moveNewsRelevancePct}%
+                        </span>
+                      </div>
+                    ) : null}
                     {n.summary ? (
                       <p className="mt-1 text-[11px] leading-relaxed text-slate-400">{n.summary}</p>
+                    ) : null}
+                    {aiMoveBlurbLoading ? (
+                      <p className="mt-1.5 text-[11px] italic text-slate-500">
+                        Linking headline to price move…
+                      </p>
+                    ) : null}
+                    {aiMoveBlurb ? (
+                      <p className="mt-1.5 border-l-2 border-cyan-400/35 pl-2 text-[11px] leading-relaxed text-cyan-100/90">
+                        {aiMoveBlurb}
+                      </p>
                     ) : null}
                     <div className="mt-1 text-[10px] text-slate-500">
                       {n.source ? <span>{n.source}</span> : null}
